@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from datetime import datetime, timezone
 from typing import Any
+
+from sentinela.repositories.siem import EventoSiemRepositorio
 
 
 _SEVERIDADES = {"DEBUG", "INFO", "NOTICE", "WARNING", "WARN", "ERROR", "HIGH", "CRITICAL", "ALERT", "EMERGENCY"}
@@ -84,57 +85,50 @@ def normalizar_syslog(mensagem: str, origem: str, origem_ip: str | None = None) 
     }
 
 
-def _rows(empresa_id: str, eventos: list[dict[str, Any]], agente_id: str | None = None):
-    for evento in eventos:
-        e = dict(evento)
-        yield (
-            empresa_id, agente_id, e.get("timestamp") or datetime.now(timezone.utc),
-            e.get("source", "unknown"), e.get("source_type", "generic"), e.get("hostname"),
-            e.get("source_ip"), e.get("destination_ip"), e.get("source_port"), e.get("destination_port"),
-            e.get("protocol"), e.get("username"), e.get("event_type", "log"), e.get("action"),
-            str(e.get("severity", "INFO")).upper(), e.get("message", ""), e.get("raw_event", e.get("message", "")),
-            json.dumps(e.get("tags", [])), json.dumps(e.get("mitre_techniques", [])), json.dumps(e.get("iocs", [])),
-        )
+def _linhas_para_insercao(empresa_id: str, eventos: list[dict[str, Any]], agente_id: str | None = None) -> list[dict[str, Any]]:
+    """Eventos normalizados -> dicts com as colunas de `eventos_siem` (JSONB vai como objeto Python)."""
+    linhas = []
+    for e in eventos:
+        linhas.append({
+            "empresa_id": empresa_id,
+            "agente_id": agente_id,
+            "timestamp": e.get("timestamp") or datetime.now(timezone.utc),
+            "source": e.get("source", "unknown"),
+            "source_type": e.get("source_type", "generic"),
+            "hostname": e.get("hostname"),
+            "source_ip": e.get("source_ip"),
+            "destination_ip": e.get("destination_ip"),
+            "source_port": e.get("source_port"),
+            "destination_port": e.get("destination_port"),
+            "protocol": e.get("protocol"),
+            "username": e.get("username"),
+            "event_type": e.get("event_type", "log"),
+            "action": e.get("action"),
+            "severity": str(e.get("severity", "INFO")).upper(),
+            "message": e.get("message", ""),
+            "raw_event": e.get("raw_event", e.get("message", "")),
+            "tags": e.get("tags", []),
+            "mitre_techniques": e.get("mitre_techniques", []),
+            "iocs": e.get("iocs", []),
+        })
+    return linhas
 
 
-_EVENT_INSERT = """
-INSERT INTO eventos_siem (
-    empresa_id, agente_id, timestamp, source, source_type, hostname,
-    source_ip, destination_ip, source_port, destination_port, protocol,
-    username, event_type, action, severity, message, raw_event, tags,
-    mitre_techniques, iocs
-) VALUES (
-    $1,$2,$3,$4,$5,$6,$7::inet,$8::inet,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19::jsonb,$20::jsonb
-)
-"""
-
-
-async def persistir_eventos(conn, empresa_id: str, eventos: list[dict[str, Any]], agente_id: str | None = None) -> int:
+async def persistir_eventos(sessao, empresa_id: str, eventos: list[dict[str, Any]], agente_id: str | None = None) -> int:
     """Persiste em lote e retorna a quantidade inserida. Use persistir_eventos_com_ids quando a correlação imediata for necessária."""
-    return len(await persistir_eventos_com_ids(conn, empresa_id, eventos, agente_id))
+    return len(await persistir_eventos_com_ids(sessao, empresa_id, eventos, agente_id))
 
 
-async def persistir_eventos_com_ids(conn, empresa_id: str, eventos: list[dict[str, Any]], agente_id: str | None = None) -> list[int]:
+async def persistir_eventos_com_ids(sessao, empresa_id: str, eventos: list[dict[str, Any]], agente_id: str | None = None) -> list[int]:
     """Insere o lote em uma única instrução e devolve os IDs exatos na mesma ordem do lote."""
     if not eventos:
         return []
-    # PostgreSQL limita uma instrução a 65535 parâmetros; cada evento usa 20.
-    # Mantemos margem e dividimos lotes grandes sem alterar a API de ingestão.
     if len(eventos) > 3000:
         ids: list[int] = []
         for inicio in range(0, len(eventos), 3000):
-            ids.extend(await persistir_eventos_com_ids(conn, empresa_id, eventos[inicio:inicio + 3000], agente_id))
+            ids.extend(await persistir_eventos_com_ids(sessao, empresa_id, eventos[inicio:inicio + 3000], agente_id))
         return ids
-    rows = list(_rows(empresa_id, eventos, agente_id))
-    values = ",".join(
-        f"(${i*20+1},${i*20+2},${i*20+3},${i*20+4},${i*20+5},${i*20+6},${i*20+7}::inet,${i*20+8}::inet,${i*20+9},${i*20+10},${i*20+11},${i*20+12},${i*20+13},${i*20+14},${i*20+15},${i*20+16},${i*20+17},${i*20+18}::jsonb,${i*20+19}::jsonb,${i*20+20}::jsonb)"
-        for i in range(len(rows))
-    )
-    args = [v for row in rows for v in row]
-    # Só placeholders ($n) gerados aqui entram na string; valores vão em *args.
-    sql = f"""INSERT INTO eventos_siem (empresa_id,agente_id,timestamp,source,source_type,hostname,source_ip,destination_ip,source_port,destination_port,protocol,username,event_type,action,severity,message,raw_event,tags,mitre_techniques,iocs) VALUES {values} RETURNING id"""  # nosec B608
-    result = await conn.fetch(sql, *args)
-    return [int(r["id"]) for r in result]
+    return await EventoSiemRepositorio(sessao).inserir_lote(_linhas_para_insercao(empresa_id, eventos, agente_id))
 
 
 class SIEMBatcher:
@@ -143,7 +137,7 @@ class SIEMBatcher:
     Agrupa eventos por tenant e descarrega por tamanho OU idade do lote.
 
     V8.2:
-    * Descarrega com a conexão escopada ao tenant (``tenant_scoped_connection``).
+    * Descarrega com a sessão escopada ao tenant (``Database.tenant_session``).
       Antes usava ``pool.acquire()`` cru: o login role ``sentinela_app`` é
       NOINHERIT e não tem privilégio nas tabelas, então NENHUM evento Syslog
       era gravado (o erro só aparecia no log).
@@ -222,13 +216,12 @@ class SIEMBatcher:
         if not eventos:
             return
         tenant, agente_id = key
-        from sentinela.db.pool import tenant_scoped_connection
         try:
-            async with tenant_scoped_connection(self.pool, tenant) as conn:
-                ids = await persistir_eventos_com_ids(conn, tenant, eventos, agente_id)
+            async with self.pool.tenant_session(tenant) as sessao:
+                ids = await persistir_eventos_com_ids(sessao, tenant, eventos, agente_id)
                 if self.correlacionar:
                     from sentinela.siem.correlacao_siem import correlacionar_lote
-                    await correlacionar_lote(conn, tenant, list(zip(ids, eventos)))
+                    await correlacionar_lote(sessao, tenant, list(zip(ids, eventos)))
             self.persistidos += len(eventos)
         except Exception:
             # Não reencaminhamos indefinidamente: evita crescimento sem limite em falha de banco.

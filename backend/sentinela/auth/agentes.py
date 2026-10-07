@@ -27,7 +27,7 @@ import secrets
 import bcrypt
 
 from sentinela.auth.security import verificar_senha
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.repositories.agentes import AgenteRepositorio
 
 PREFIXO_TOKEN = "agt"
 TAMANHO_PREFIXO_HEX = 12
@@ -68,24 +68,19 @@ async def autenticar_agente(pool, token: str) -> dict | None:
     auth/dependencies.py:agente_atual).
     """
     prefixo = extrair_prefixo(token or "")
-    async with superadmin_scoped_connection(pool) as conn:
-        agente = None
-        if prefixo is not None:
-            agente = await conn.fetchrow(
-                """
-                SELECT id, empresa_id, hostname, token_hash
-                FROM agentes
-                WHERE token_prefixo = $1 AND status = 'ativo'
-                """,
-                prefixo,
-            )
-        token_valido = await asyncio.to_thread(
-            verificar_senha, token, agente["token_hash"] if agente else _HASH_DUMMY
-        )
-        if agente and token_valido:
-            return {
-                "agente_id": agente["id"],
-                "empresa_id": agente["empresa_id"],
-                "hostname": agente["hostname"],
-            }
+    # A consulta (barata) roda e a sessão é devolvida ao pool ANTES do bcrypt:
+    # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
+    agente = None
+    if prefixo is not None:
+        async with pool.superadmin_session() as sessao:
+            agente = await AgenteRepositorio(sessao).buscar_ativo_por_prefixo(prefixo)
+    token_valido = await asyncio.to_thread(
+        verificar_senha, token, agente["token_hash"] if agente else _HASH_DUMMY
+    )
+    if agente and token_valido:
+        return {
+            "agente_id": agente["id"],
+            "empresa_id": agente["empresa_id"],
+            "hostname": agente["hostname"],
+        }
     return None

@@ -17,6 +17,7 @@ from sentinela.core.analisador_logs import candidatos_por_limite, perfil_comport
 from sentinela.core.mitre import obter_mitre
 from sentinela.core.correlacao import correlacionar_por_ip
 from sentinela.core.risk_engine import aplicar_amortecimento_falso_positivo, calcular_risco
+from sentinela.repositories.empresas import EmpresaRepositorio
 from sentinela.services import automacao as servico_automacao
 from sentinela.services import firewall as servico_firewall
 from sentinela.services import incidentes as servico_incidentes
@@ -28,7 +29,7 @@ _TETO_HORAS_AUTOMACAO_CONTROLADA = 24
 
 
 async def responder_a_incidentes(
-    conn,
+    sessao,
     empresa_id,
     relatorio: dict,
     limite_ataques: int = 5,
@@ -92,7 +93,8 @@ async def responder_a_incidentes(
     except Exception:
         correlacoes = {}
 
-    modo_firewall = await conn.fetchval("SELECT modo_firewall FROM empresas WHERE id = $1", empresa_id)
+    config_firewall = await EmpresaRepositorio(sessao).obter_config_firewall(empresa_id)
+    modo_firewall = config_firewall.modo_firewall if config_firewall else None
     if modo_firewall not in MODOS_FIREWALL_VALIDOS:
         modo_firewall = "automacao_controlada"  # linha não encontrada, ou valor inesperado -- cai no padrão mais conservador-razoável
 
@@ -150,9 +152,9 @@ async def responder_a_incidentes(
         # (que ficaria travada em "current transaction is aborted" para
         # todo o resto do lote se não fosse por isso).
         try:
-            async with conn.transaction():
+            async with sessao.begin_nested():
                 if verificar_reputacao:
-                    entrada["reputacao"] = await servico_reputacao.consultar_reputacao_ip(conn, empresa_id, candidato["ip"])
+                    entrada["reputacao"] = await servico_reputacao.consultar_reputacao_ip(sessao, empresa_id, candidato["ip"])
 
                 entrada["correlacao"] = correlacoes.get(candidato["ip"], {"score": 0, "severity": "LOW", "sinais": []})
                 entrada["risk"] = calcular_risco(
@@ -171,7 +173,7 @@ async def responder_a_incidentes(
                 # menos antes de decidir criar um novo incidente/bloqueio.
                 # Só torna o sistema mais conservador -- nunca eleva risco.
                 qtd_falsos_positivos = await servico_automacao.obter_contagem_falsos_positivos(
-                    conn, empresa_id, candidato["ip"],
+                    sessao, empresa_id, candidato["ip"],
                 )
                 if qtd_falsos_positivos:
                     entrada["risk"] = aplicar_amortecimento_falso_positivo(entrada["risk"], qtd_falsos_positivos)
@@ -179,7 +181,7 @@ async def responder_a_incidentes(
                 incidente = None
                 if entrada["risk"]["severity"] in ("HIGH", "CRITICAL"):
                     incidente = await servico_incidentes.criar_incidente(
-                        conn, empresa_id, candidato["ip"], entrada["risk"], candidato["tipos_ataque"]
+                        sessao, empresa_id, candidato["ip"], entrada["risk"], candidato["tipos_ataque"]
                     )
                     entrada["incident_id"] = incidente["incident_id"] if incidente else None
 
@@ -196,7 +198,7 @@ async def responder_a_incidentes(
                 if deve_bloquear:
                     motivo = f"{candidato['total_ataques']} ataques detectados ({', '.join(candidato['tipos_ataque'])})"
                     entrada["bloqueio"] = await servico_firewall.registrar_bloqueio(
-                        conn, empresa_id, candidato["ip"], motivo,
+                        sessao, empresa_id, candidato["ip"], motivo,
                         whitelist=whitelist, dry_run=dry_run_efetivo, duracao_horas=duracao_horas_efetiva,
                         origem=origem, usuario_id=usuario_id, incidente_id=incidente["id"] if incidente else None,
                     )

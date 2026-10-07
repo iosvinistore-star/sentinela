@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
+from sentinela.db.pool import tenant_scoped_connection
 from sentinela.siem.correlacao_siem import correlacionar_lote
 from sentinela.siem.retencao import executar_retencao_siem
 from sentinela.siem.servico import SIEMBatcher, persistir_eventos_com_ids
@@ -125,8 +125,7 @@ async def test_retencao_arquiva_e_expira(pool, empresa_factory):
             _ev(message="morno", timestamp=agora - timedelta(days=100)),
             _ev(message="velho", timestamp=agora - timedelta(days=400)),
         ])
-    async with superadmin_scoped_connection(pool) as conn:
-        r = await executar_retencao_siem(conn, 90, 365, tamanho_fatia=1)
+    r = await executar_retencao_siem(pool, 90, 365, tamanho_fatia=1)
     assert r["arquivados"] >= 1 and r["expirados"] >= 1
     async with tenant_scoped_connection(pool, emp) as conn:
         assert [x["message"] for x in await conn.fetch("SELECT message FROM eventos_siem")] == ["recente"]

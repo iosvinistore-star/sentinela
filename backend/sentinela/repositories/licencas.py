@@ -4,9 +4,12 @@
 # Ver o arquivo LICENSE na raiz do projeto.
 # SENTINELA-COPYRIGHT-FIM
 """Acesso a dados de licenciamento: `planos`, `licencas`, `licencas_endpoints`, `licencas_eventos`."""
-from sqlalchemy import func, select, update
+from datetime import timedelta
 
-from sentinela.models import Licenca, LicencaEndpoint, LicencaEvento, Plano
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from sentinela.models import Licenca, LicencaEndpoint, LicencaEvento, LicencaNonceUsado, Plano
 from sentinela.repositories.base import RepositorioBase
 
 
@@ -97,3 +100,34 @@ class LicencaRepositorio(RepositorioBase):
     async def registrar_evento(self, empresa_id, licenca_id, tipo: str, detalhes: dict) -> None:
         self.sessao.add(LicencaEvento(empresa_id=empresa_id, licenca_id=licenca_id, tipo=tipo, detalhes=detalhes))
         await self.sessao.flush()
+
+    # --- autenticação por token / anti-replay ---------------------------------
+    async def buscar_por_prefixo(self, prefixo: str) -> dict | None:
+        """Resolve o token da licença (de QUALQUER status: quem decide é a rota)."""
+        stmt = select(
+            Licenca.id, Licenca.empresa_id, Licenca.plano_id, Licenca.status, Licenca.expira_em, Licenca.token_hash
+        ).where(Licenca.token_prefixo == prefixo)
+        linha = (await self.sessao.execute(stmt)).one_or_none()
+        return dict(linha._mapping) if linha else None
+
+    async def status_da_licenca_do_agente(self, agente_id):
+        """(status, expira_em) da licença cuja vaga o agente ocupa, ou None se não ocupa nenhuma."""
+        stmt = (
+            select(Licenca.status, Licenca.expira_em)
+            .join(LicencaEndpoint, LicencaEndpoint.licenca_id == Licenca.id)
+            .where(LicencaEndpoint.agente_id == agente_id, LicencaEndpoint.liberado_em.is_(None))
+        )
+        return (await self.sessao.execute(stmt)).one_or_none()
+
+    async def limpar_nonces_antigos(self, janela_segundos: float) -> None:
+        await self.sessao.execute(
+            delete(LicencaNonceUsado).where(LicencaNonceUsado.criado_em < func.now() - timedelta(seconds=janela_segundos))
+        )
+
+    async def registrar_nonce(self, licenca_id, nonce: str) -> bool:
+        """True na PRIMEIRA apresentação do par (licenca, nonce); False num replay. Atômico."""
+        stmt = (
+            pg_insert(LicencaNonceUsado).values(licenca_id=licenca_id, nonce=nonce)
+            .on_conflict_do_nothing(index_elements=["licenca_id", "nonce"]).returning(LicencaNonceUsado.id)
+        )
+        return (await self.sessao.execute(stmt)).first() is not None

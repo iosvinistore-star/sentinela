@@ -23,23 +23,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from sentinela.auth.dependencies import conexao_tenant, exigir_papel
+from sentinela.services import cti as servico_cti
 from sentinela.siem.cti import NAMESPACE_STIX, indicador_para_stix
 
 router = APIRouter(prefix="/cti", tags=["cti-feed"])
 
 COLECAO_ID = "sentinela-indicators"
 MEDIA_TAXII = "application/taxii+json;version=2.1"
-_SQL = """SELECT id, stix_id, indicator_type, valor, pattern, confidence, valid_until, labels, criado_em
-            FROM cti_indicadores WHERE empresa_id=$1 AND id > $2 ORDER BY id LIMIT $3"""
 
 
 @router.get("/stix/export")
 async def exportar_stix(limite: int = Query(1000, ge=1, le=5000), usuario=Depends(exigir_papel("admin", "analista")),
-                        conn=Depends(conexao_tenant)):
+                        sessao=Depends(conexao_tenant)):
     empresa = str(usuario["empresa_id"])
-    rows = await conn.fetch(_SQL, usuario["empresa_id"], 0, limite)
+    rows = await servico_cti.indicadores_para_feed(sessao, usuario["empresa_id"], 0, limite)
     return {"type": "bundle", "id": f"bundle--{uuid.uuid4()}",
-            "objects": [indicador_para_stix(dict(r), empresa) for r in rows]}
+            "objects": [indicador_para_stix(r, empresa) for r in rows]}
 
 
 @router.get("/taxii/collections")
@@ -55,14 +54,14 @@ async def collections(usuario=Depends(exigir_papel("admin", "analista"))):
 @router.get("/taxii/collections/{collection_id}/objects")
 async def taxii_objects(collection_id: str, limite: int = Query(1000, ge=1, le=5000),
                         cursor: int = Query(0, ge=0, alias="next"),
-                        usuario=Depends(exigir_papel("admin", "analista")), conn=Depends(conexao_tenant)):
+                        usuario=Depends(exigir_papel("admin", "analista")), sessao=Depends(conexao_tenant)):
     if collection_id != COLECAO_ID:
         raise HTTPException(status_code=404, detail="coleção não encontrada")
     empresa = str(usuario["empresa_id"])
-    rows = await conn.fetch(_SQL, usuario["empresa_id"], cursor, limite + 1)
+    rows = await servico_cti.indicadores_para_feed(sessao, usuario["empresa_id"], cursor, limite + 1)
     mais = len(rows) > limite
     rows = rows[:limite]
-    corpo: dict = {"more": mais, "objects": [indicador_para_stix(dict(r), empresa) for r in rows]}
+    corpo: dict = {"more": mais, "objects": [indicador_para_stix(r, empresa) for r in rows]}
     if mais:
         corpo["next"] = str(rows[-1]["id"])
     return JSONResponse(corpo, media_type=MEDIA_TAXII)

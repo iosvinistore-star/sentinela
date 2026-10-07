@@ -45,3 +45,18 @@ class SuperadminRepositorio(RepositorioBase):
         ).where(Superadmin.email == email)
         linha = (await self.sessao.execute(stmt)).one_or_none()
         return dict(linha._mapping) if linha else None
+
+    async def obter_para_sessao(self, superadmin_id):
+        """(token_version, papel) para reconferir a sessão em tempo real, ou None."""
+        stmt = select(Superadmin.token_version, Superadmin.papel).where(Superadmin.id == superadmin_id)
+        return (await self.sessao.execute(stmt)).one_or_none()
+
+    async def obter_para_refresh(self, superadmin_id):
+        stmt = select(
+            Superadmin.id, Superadmin.email, Superadmin.papel, Superadmin.token_version, Superadmin.mfa_habilitado
+        ).where(Superadmin.id == superadmin_id)
+        linha = (await self.sessao.execute(stmt)).one_or_none()
+        return dict(linha._mapping) if linha else None
+
+    async def existe_algum(self) -> bool:
+        return (await self.sessao.execute(select(Superadmin.id).limit(1))).first() is not None

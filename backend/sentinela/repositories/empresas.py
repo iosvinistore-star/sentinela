@@ -33,3 +33,33 @@ class EmpresaRepositorio(RepositorioBase):
             .returning(Empresa).execution_options(synchronize_session=False)
         )
         return (await self.sessao.execute(stmt)).scalar_one_or_none()
+
+    async def obter_config_firewall(self, empresa_id):
+        """(modo_firewall, modo_firewall_auto) ou None."""
+        stmt = select(Empresa.modo_firewall, Empresa.modo_firewall_auto).where(Empresa.id == empresa_id)
+        return (await self.sessao.execute(stmt)).one_or_none()
+
+    async def definir_modo_firewall(self, empresa_id, modo: str) -> None:
+        await self.sessao.execute(
+            update(Empresa).where(Empresa.id == empresa_id).values(modo_firewall=modo)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def auto_triagem_ligada(self, empresa_id) -> bool:
+        stmt = select(Empresa.auto_triagem_incidentes).where(Empresa.id == empresa_id)
+        return bool((await self.sessao.execute(stmt)).scalar_one_or_none())
+
+    async def listar_ids_com_autonomia(self) -> list:
+        """Empresas ativas com ao menos uma flag de autonomia ligada."""
+        stmt = select(Empresa.id).where(
+            Empresa.status == "ativa", Empresa.modo_firewall_auto | Empresa.auto_triagem_incidentes
+        )
+        return list((await self.sessao.execute(stmt)).scalars())
+
+    async def obter_status(self, empresa_id) -> str | None:
+        return (await self.sessao.execute(select(Empresa.status).where(Empresa.id == empresa_id))).scalar_one_or_none()
+
+    async def obter_status_e_agentes(self, empresa_id):
+        """(status, agentes_endpoint_habilitado) ou None."""
+        stmt = select(Empresa.status, Empresa.agentes_endpoint_habilitado).where(Empresa.id == empresa_id)
+        return (await self.sessao.execute(stmt)).one_or_none()

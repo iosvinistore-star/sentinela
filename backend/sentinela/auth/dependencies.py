@@ -25,7 +25,11 @@ from sentinela.auth.licencas import autenticar_licenca
 from sentinela.auth.licencas import extrair_prefixo as extrair_prefixo_licenca
 from sentinela.auth.security import decodificar_token_sessao
 from sentinela.core.log_context import adicionar_contexto
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
+from sentinela.repositories.agentes import AgenteRepositorio
+from sentinela.repositories.empresas import EmpresaRepositorio
+from sentinela.repositories.licencas import LicencaRepositorio
+from sentinela.repositories.superadmins import SuperadminRepositorio
+from sentinela.repositories.usuarios import UsuarioRepositorio
 from sentinela.util import obter_ip_cliente
 
 HEADER_TOKEN_AGENTE = "X-Sentinela-Agent-Token"
@@ -202,22 +206,19 @@ async def conexao_tenant(usuario: dict = Depends(exigir_login), request: Request
     vir `None`, caindo no mesmo 401 de "sessão inválida" de qualquer outra
     adulteração de claim.
     """
-    async with tenant_scoped_connection(_pool(request), usuario["empresa_id"]) as conn:
-        status = await conn.fetchval("SELECT status FROM empresas WHERE id = $1", usuario["empresa_id"])
+    async with _pool(request).tenant_session(usuario["empresa_id"]) as sessao:
+        status = await EmpresaRepositorio(sessao).obter_status(usuario["empresa_id"])
         if status != "ativa":
             raise HTTPException(status_code=403, detail=f"empresa {status} -- acesso bloqueado")
-        linha = await conn.fetchrow(
-            "SELECT ativo, papel, token_version FROM usuarios WHERE id = $1 AND empresa_id = $2",
-            usuario["sub"], usuario["empresa_id"],
-        )
+        linha = await UsuarioRepositorio(sessao).obter_para_sessao(usuario["sub"], usuario["empresa_id"])
         if (
             linha is None
-            or not linha["ativo"]
-            or linha["papel"] != usuario["papel"]
-            or linha["token_version"] != usuario.get("tv")
+            or not linha.ativo
+            or linha.papel != usuario["papel"]
+            or linha.token_version != usuario.get("tv")
         ):
             raise HTTPException(status_code=401, detail="sessão inválida -- faça login novamente")
-        yield conn
+        yield sessao
 
 
 async def agente_atual(
@@ -362,29 +363,18 @@ async def conexao_tenant_agente(agente: dict = Depends(agente_atual), request: R
     única fonte de verdade, sempre em tempo real, exatamente como o
     documento de arquitetura especifica.
     """
-    async with tenant_scoped_connection(_pool(request), agente["empresa_id"]) as conn:
-        linha = await conn.fetchrow(
-            "SELECT status, agentes_endpoint_habilitado FROM empresas WHERE id = $1", agente["empresa_id"],
-        )
-        if linha is None or linha["status"] != "ativa":
+    async with _pool(request).tenant_session(agente["empresa_id"]) as sessao:
+        linha = await EmpresaRepositorio(sessao).obter_status_e_agentes(agente["empresa_id"])
+        if linha is None or linha.status != "ativa":
             raise HTTPException(status_code=403, detail="empresa inativa -- acesso bloqueado")
-        if not linha["agentes_endpoint_habilitado"]:
+        if not linha.agentes_endpoint_habilitado:
             raise HTTPException(status_code=403, detail="capacidade Sentinela Endpoint não está habilitada para esta empresa")
-        habilitado = await conn.fetchval("SELECT habilitado FROM agentes WHERE id = $1 AND empresa_id = $2", agente["agente_id"], agente["empresa_id"])
-        if not habilitado:
+        if not await AgenteRepositorio(sessao).esta_habilitado(agente["agente_id"], agente["empresa_id"]):
             raise HTTPException(status_code=403, detail="Agent desabilitado -- kill switch ativo")
 
-        vaga = await conn.fetchrow(
-            """
-            SELECT l.status, l.expira_em
-            FROM licencas_endpoints le
-            JOIN licencas l ON l.id = le.licenca_id
-            WHERE le.agente_id = $1 AND le.liberado_em IS NULL
-            """,
-            agente["agente_id"],
-        )
+        vaga = await LicencaRepositorio(sessao).status_da_licenca_do_agente(agente["agente_id"])
         if vaga is not None:
-            status_licenca = vaga["status"]
+            status_licenca = vaga.status
             # Uma licença formalmente 'ativa' mas com `expira_em` no
             # passado é tratada como 'expirada' para efeito deste gate --
             # nenhum job de expiração automática existe ainda (fora de
@@ -392,12 +382,12 @@ async def conexao_tenant_agente(agente: dict = Depends(agente_atual), request: R
             # isto uma licença vencida e nunca revogada manualmente
             # continuaria autenticando heartbeats para sempre, o mesmo gap
             # que esta correção existe para fechar.
-            if status_licenca == "ativa" and vaga["expira_em"] is not None and vaga["expira_em"] < datetime.now(timezone.utc):
+            if status_licenca == "ativa" and vaga.expira_em is not None and vaga.expira_em < datetime.now(timezone.utc):
                 status_licenca = "expirada"
             if status_licenca != "ativa":
                 raise HTTPException(status_code=403, detail=f"licença {status_licenca} -- Sentinela Endpoint suspenso")
 
-        yield conn
+        yield sessao
 
 
 async def conexao_superadmin(su: dict = Depends(exigir_superadmin), request: Request = None):
@@ -424,18 +414,16 @@ async def conexao_superadmin(su: dict = Depends(exigir_superadmin), request: Req
     Fase C) é tratada como 'saas_owner' -- mesma regra de compatibilidade
     de `auth/rbac.py:resolver_papel_conceitual`.
     """
-    async with superadmin_scoped_connection(_pool(request)) as conn:
-        linha = await conn.fetchrow(
-            "SELECT token_version, papel FROM superadmins WHERE id = $1", su["sub"],
-        )
+    async with _pool(request).superadmin_session() as sessao:
+        linha = await SuperadminRepositorio(sessao).obter_para_sessao(su["sub"])
         papel_saas_no_token = su.get("papel_saas") or "saas_owner"
         if (
             linha is None
-            or linha["token_version"] != su.get("tv")
-            or linha["papel"] != papel_saas_no_token
+            or linha.token_version != su.get("tv")
+            or linha.papel != papel_saas_no_token
         ):
             raise HTTPException(status_code=401, detail="sessão inválida -- faça login novamente")
-        yield conn
+        yield sessao
 
 
 def _timestamp_replay_valido(valor: str, agora: float) -> bool:
@@ -469,21 +457,10 @@ async def _registrar_nonce_ou_recusar(pool, licenca_id, nonce: str) -> bool:
     `_timestamp_replay_valido`), então não precisa de um job agendado à
     parte para a tabela não crescer sem limite.
     """
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "DELETE FROM licencas_nonces_usados WHERE criado_em < now() - make_interval(secs => $1)",
-            float(JANELA_REPLAY_SEGUNDOS),
-        )
-        linha = await conn.fetchrow(
-            """
-            INSERT INTO licencas_nonces_usados (licenca_id, nonce)
-            VALUES ($1, $2)
-            ON CONFLICT (licenca_id, nonce) DO NOTHING
-            RETURNING id
-            """,
-            licenca_id, nonce,
-        )
-    return linha is not None
+    async with pool.superadmin_session() as sessao:
+        repo = LicencaRepositorio(sessao)
+        await repo.limpar_nonces_antigos(JANELA_REPLAY_SEGUNDOS)
+        return await repo.registrar_nonce(licenca_id, nonce)
 
 
 async def licenca_atual(
@@ -582,11 +559,11 @@ async def conexao_tenant_licenca(licenca: dict = Depends(licenca_atual), request
     licenciamento não é uma capacidade que uma empresa liga/desliga, é
     inerente a toda empresa existir sob algum plano.
     """
-    async with tenant_scoped_connection(_pool(request), licenca["empresa_id"]) as conn:
-        status_empresa = await conn.fetchval("SELECT status FROM empresas WHERE id = $1", licenca["empresa_id"])
+    async with _pool(request).tenant_session(licenca["empresa_id"]) as sessao:
+        status_empresa = await EmpresaRepositorio(sessao).obter_status(licenca["empresa_id"])
         if status_empresa != "ativa":
             raise HTTPException(status_code=403, detail=f"empresa {status_empresa} -- acesso bloqueado")
-        yield conn
+        yield sessao
 
 
 async def enrollment_atual(
@@ -650,12 +627,10 @@ async def conexao_tenant_enrollment(enrollment: dict = Depends(enrollment_atual)
     agente nunca aparece ativo" descoberta só no primeiro heartbeat (ver
     ARQUITETURA_LICENCIAMENTO.md §12).
     """
-    async with tenant_scoped_connection(_pool(request), enrollment["empresa_id"]) as conn:
-        linha = await conn.fetchrow(
-            "SELECT status, agentes_endpoint_habilitado FROM empresas WHERE id = $1", enrollment["empresa_id"],
-        )
-        if linha is None or linha["status"] != "ativa":
+    async with _pool(request).tenant_session(enrollment["empresa_id"]) as sessao:
+        linha = await EmpresaRepositorio(sessao).obter_status_e_agentes(enrollment["empresa_id"])
+        if linha is None or linha.status != "ativa":
             raise HTTPException(status_code=403, detail="empresa inativa -- acesso bloqueado")
-        if not linha["agentes_endpoint_habilitado"]:
+        if not linha.agentes_endpoint_habilitado:
             raise HTTPException(status_code=403, detail="capacidade Sentinela Endpoint não está habilitada para esta empresa")
-        yield conn
+        yield sessao

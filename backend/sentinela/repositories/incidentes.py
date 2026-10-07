@@ -6,7 +6,7 @@
 """Acesso a dados da tabela `incidentes` e das agregações do dashboard."""
 from datetime import timedelta
 
-from sqlalchemy import Integer, Text, case, cast, func, literal, select, text, update
+from sqlalchemy import Integer, Text, case, cast, exists, func, literal, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -136,3 +136,52 @@ class IncidenteRepositorio(RepositorioBase):
             .limit(limite)
         )
         return [dict(r._mapping) for r in await self.sessao.execute(stmt)]
+
+    # --- autonomia operacional (services/automacao.py) -------------------------
+
+    async def amostras_de_bloqueios_automaticos(self, empresa_id, limite: int) -> list[dict]:
+        """Últimos bloqueios originados de um incidente, com os sinais de 'problema' (reversão rápida / falso positivo)."""
+        stmt = (
+            select(
+                BloqueioFirewall.bloqueado_em,
+                BloqueioFirewall.removido_em,
+                (
+                    BloqueioFirewall.removido_em.is_not(None)
+                    & (BloqueioFirewall.removido_em - BloqueioFirewall.bloqueado_em < timedelta(hours=2))
+                ).label("revertido_rapido"),
+                (Incidente.status == "FALSO_POSITIVO").label("foi_falso_positivo"),
+            )
+            .join(Incidente, Incidente.id == BloqueioFirewall.incidente_id)
+            .where(BloqueioFirewall.empresa_id == empresa_id, BloqueioFirewall.incidente_id.is_not(None))
+            .order_by(BloqueioFirewall.bloqueado_em.desc())
+            .limit(limite)
+        )
+        return [dict(r._mapping) for r in await self.sessao.execute(stmt)]
+
+    async def candidatos_a_triagem(self, empresa_id, parado_antes_de) -> list[dict]:
+        """Incidentes abertos que nenhum humano tocou e que estão parados desde antes de `parado_antes_de`."""
+        contido = exists().where(BloqueioFirewall.incidente_id == Incidente.id, BloqueioFirewall.status == "ativo")
+        stmt = select(
+            Incidente.id, Incidente.incident_id, cast(Incidente.ip, Text).label("ip"), Incidente.severidade,
+            Incidente.observacoes, Incidente.origem, contido.label("contido"),
+        ).where(
+            Incidente.empresa_id == empresa_id,
+            Incidente.status.in_(("OPEN", "EM_ANDAMENTO")),
+            Incidente.em_andamento_por_usuario_id.is_(None),
+            Incidente.atualizado_em < parado_antes_de,
+        )
+        return [dict(r._mapping) for r in await self.sessao.execute(stmt)]
+
+    async def resolver_pelo_sistema(self, incidente_pk: int, status: str, observacoes: str) -> None:
+        await self.sessao.execute(
+            update(Incidente).where(Incidente.id == incidente_pk)
+            .values(status=status, resolvido_por="sistema", observacoes=observacoes, atualizado_em=func.now())
+            .execution_options(synchronize_session=False)
+        )
+
+    async def contar_falsos_positivos_de_rede(self, empresa_id, ip: str) -> int:
+        stmt = select(func.count()).select_from(Incidente).where(
+            Incidente.empresa_id == empresa_id, Incidente.ip == ip,
+            Incidente.status == "FALSO_POSITIVO", Incidente.origem == "rede",
+        )
+        return (await self.sessao.execute(stmt)).scalar_one()

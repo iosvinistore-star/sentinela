@@ -61,6 +61,18 @@ class AgenteRepositorio(RepositorioBase):
         self.sessao.add(AgenteEvento(empresa_id=empresa_id, agente_id=agente_id, tipo=tipo, payload=payload))
         await self.sessao.flush()
 
+    async def buscar_ativo_por_prefixo(self, prefixo: str) -> dict | None:
+        """Para autenticar o token do agente (sessão superadmin: ainda não se sabe o tenant)."""
+        stmt = select(Agente.id, Agente.empresa_id, Agente.hostname, Agente.token_hash).where(
+            Agente.token_prefixo == prefixo, Agente.status == "ativo"
+        )
+        linha = (await self.sessao.execute(stmt)).one_or_none()
+        return dict(linha._mapping) if linha else None
+
+    async def esta_habilitado(self, agente_id, empresa_id) -> bool:
+        stmt = select(Agente.habilitado).where(Agente.id == agente_id, Agente.empresa_id == empresa_id)
+        return bool((await self.sessao.execute(stmt)).scalar_one_or_none())
+
 
 class EnrollmentRepositorio(RepositorioBase):
     async def criar(self, empresa_id, prefixo, token_hash, expira_em, max_usos, criado_por) -> AgenteEnrollmentToken:
@@ -101,3 +113,12 @@ class EnrollmentRepositorio(RepositorioBase):
     async def obter_status(self, enrollment_id):
         t = AgenteEnrollmentToken
         return (await self.sessao.execute(select(t.status, t.expira_em).where(t.id == enrollment_id))).one_or_none()
+
+    async def buscar_por_prefixo(self, prefixo: str) -> dict | None:
+        """Resolve o token de enrollment (de QUALQUER status: quem decide é o serviço)."""
+        t = AgenteEnrollmentToken
+        stmt = select(t.id, t.empresa_id, t.status, t.expira_em, t.max_usos, t.usos, t.token_hash).where(
+            t.token_prefixo == prefixo
+        )
+        linha = (await self.sessao.execute(stmt)).one_or_none()
+        return dict(linha._mapping) if linha else None

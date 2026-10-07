@@ -30,7 +30,7 @@ import secrets
 import bcrypt
 
 from sentinela.auth.security import verificar_senha
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.repositories.licencas import LicencaRepositorio
 
 PREFIXO_TOKEN = "lic"
 TAMANHO_PREFIXO_HEX = 12
@@ -76,26 +76,21 @@ async def autenticar_licenca(pool, token: str) -> dict | None:
     o HTTPException (mesmo padrão de auth/agentes.py:autenticar_agente).
     """
     prefixo = extrair_prefixo(token or "")
-    async with superadmin_scoped_connection(pool) as conn:
-        licenca = None
-        if prefixo is not None:
-            licenca = await conn.fetchrow(
-                """
-                SELECT id, empresa_id, plano_id, status, expira_em, token_hash
-                FROM licencas
-                WHERE token_prefixo = $1
-                """,
-                prefixo,
-            )
-        token_valido = await asyncio.to_thread(
-            verificar_senha, token, licenca["token_hash"] if licenca else _HASH_DUMMY
-        )
-        if licenca and token_valido:
-            return {
-                "licenca_id": licenca["id"],
-                "empresa_id": licenca["empresa_id"],
-                "plano_id": licenca["plano_id"],
-                "status": licenca["status"],
-                "expira_em": licenca["expira_em"],
-            }
+    # A consulta (barata) roda e a sessão é devolvida ao pool ANTES do bcrypt:
+    # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
+    licenca = None
+    if prefixo is not None:
+        async with pool.superadmin_session() as sessao:
+            licenca = await LicencaRepositorio(sessao).buscar_por_prefixo(prefixo)
+    token_valido = await asyncio.to_thread(
+        verificar_senha, token, licenca["token_hash"] if licenca else _HASH_DUMMY
+    )
+    if licenca and token_valido:
+        return {
+            "licenca_id": licenca["id"],
+            "empresa_id": licenca["empresa_id"],
+            "plano_id": licenca["plano_id"],
+            "status": licenca["status"],
+            "expira_em": licenca["expira_em"],
+        }
     return None

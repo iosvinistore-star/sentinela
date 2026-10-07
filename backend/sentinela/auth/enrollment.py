@@ -29,7 +29,7 @@ import secrets
 import bcrypt
 
 from sentinela.auth.security import verificar_senha
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.repositories.agentes import EnrollmentRepositorio
 
 PREFIXO_TOKEN = "enr"
 TAMANHO_PREFIXO_HEX = 12
@@ -76,27 +76,22 @@ async def autenticar_enrollment(pool, token: str) -> dict | None:
     HTTPException (mesmo padrão de auth/agentes.py:autenticar_agente).
     """
     prefixo = extrair_prefixo(token or "")
-    async with superadmin_scoped_connection(pool) as conn:
-        registro = None
-        if prefixo is not None:
-            registro = await conn.fetchrow(
-                """
-                SELECT id, empresa_id, status, expira_em, max_usos, usos, token_hash
-                FROM agentes_enrollment_tokens
-                WHERE token_prefixo = $1
-                """,
-                prefixo,
-            )
-        token_valido = await asyncio.to_thread(
-            verificar_senha, token, registro["token_hash"] if registro else _HASH_DUMMY
-        )
-        if registro and token_valido:
-            return {
-                "enrollment_id": registro["id"],
-                "empresa_id": registro["empresa_id"],
-                "status": registro["status"],
-                "expira_em": registro["expira_em"],
-                "max_usos": registro["max_usos"],
-                "usos": registro["usos"],
-            }
+    # A consulta (barata) roda e a sessão é devolvida ao pool ANTES do bcrypt:
+    # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
+    registro = None
+    if prefixo is not None:
+        async with pool.superadmin_session() as sessao:
+            registro = await EnrollmentRepositorio(sessao).buscar_por_prefixo(prefixo)
+    token_valido = await asyncio.to_thread(
+        verificar_senha, token, registro["token_hash"] if registro else _HASH_DUMMY
+    )
+    if registro and token_valido:
+        return {
+            "enrollment_id": registro["id"],
+            "empresa_id": registro["empresa_id"],
+            "status": registro["status"],
+            "expira_em": registro["expira_em"],
+            "max_usos": registro["max_usos"],
+            "usos": registro["usos"],
+        }
     return None
