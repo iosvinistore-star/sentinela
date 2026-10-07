@@ -41,7 +41,7 @@ starlette==1.6.0
 # padrão da própria comunidade Python para "preciso descriptografar depois"
 # sem implementar AES/HMAC manualmente.
 pyotp==2.9.0
-cryptography==46.0.3
+cryptography==47.0.0
 # Fase E (E1, ver ARQUITETURA_OBSERVABILIDADE.md §2.1): biblioteca OFICIAL
 # do próprio projeto Prometheus -- ao contrário do formatter JSON de E2
 # (onde reimplementar à mão foi a decisão certa), aqui o formato de
