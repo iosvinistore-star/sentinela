@@ -1,0 +1,35 @@
+<div id="detalhe-incidente">
+  <h1>{{ incidente.incident_id }}</h1>
+  <dl class="ficha">
+    <dt>IP</dt><dd>{{ incidente.ip }}</dd>
+    <dt>Severidade</dt><dd><span class="badge badge-{{ incidente.severidade|lower }}">{{ incidente.severidade }}</span></dd>
+    <dt>Pontuação de risco</dt><dd>{{ incidente.pontuacao_risco }}</dd>
+    <dt>Status</dt><dd>{{ incidente.status }}</dd>
+    <dt>Ataques observados</dt>
+    <dd>
+      <ul>
+        {% for a in incidente.ataques %}<li>{{ a }}</li>{% endfor %}
+      </ul>
+    </dd>
+    <dt>Observações</dt><dd>{{ incidente.observacoes or "—" }}</dd>
+    <dt>Criado em</dt><dd>{{ incidente.criado_em }}</dd>
+    <dt>Atualizado em</dt><dd>{{ incidente.atualizado_em }}</dd>
+  </dl>
+
+  <form class="formulario" hx-post="/incidentes/{{ incidente.incident_id }}/status"
+        hx-target="#detalhe-incidente" hx-swap="outerHTML">
+    <label>
+      Novo status
+      <select name="status">
+        {% for s in status_validos %}
+          <option value="{{ s }}" {% if incidente.status == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Observações
+      <textarea name="observacoes" rows="3">{{ incidente.observacoes }}</textarea>
+    </label>
+    <button type="submit" class="botao-primario">Atualizar status</button>
+  </form>
+</div>

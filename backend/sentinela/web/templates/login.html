@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block titulo %}Entrar — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<div class="caixa-login">
+  <h1>🛡️ Sentinela SOC</h1>
+  <p class="subtitulo">Entre com sua conta para continuar.</p>
+  {% if erro %}<p class="alerta alerta-erro">{{ erro }}</p>{% endif %}
+  <form method="post" action="/login" class="formulario">
+    <input type="hidden" name="proxima" value="{{ proxima or '/' }}">
+    <label>
+      Email
+      <input type="email" name="email" required autofocus>
+    </label>
+    <label>
+      Senha
+      <input type="password" name="senha" required>
+    </label>
+    <button type="submit" class="botao-primario">Entrar</button>
+  </form>
+  <p><a href="/esqueci-senha">Esqueci minha senha</a></p>
+</div>
+{% endblock %}

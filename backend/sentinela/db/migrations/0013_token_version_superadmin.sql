@@ -1,0 +1,34 @@
+-- SENTINELA-COPYRIGHT-INICIO
+-- Copyright (c) 2026 Vinicius Martins. Todos os direitos reservados.
+-- Sentinela SOC -- software proprietário; uso, cópia e distribuição somente sob licença.
+-- Ver o arquivo LICENSE na raiz do projeto.
+-- SENTINELA-COPYRIGHT-FIM
+-- Ponto 6 do review de hardening pós-auditoria (segunda rodada): estende
+-- `token_version` (migrations/0011_token_version.sql) para `superadmins`.
+--
+-- 0011 deixou superadmins de fora deliberadamente porque `conexao_superadmin`
+-- não fazia NENHUM recheque contra o banco a cada requisição (diferente de
+-- `conexao_tenant`, que já recarregava ativo/papel) -- então na época não
+-- havia "reforço em tempo real" nenhum para encaixar um token_version. Mas
+-- isso significa que, hoje, uma sessão de superadmin comprometida (cookie
+-- vazado, navegador compartilhado) só perde acesso quando o JWT expira
+-- sozinho (`sessao_horas`, 12h por padrão) -- não existe NENHUMA forma de
+-- revogar essa sessão antes disso. Para a conta de maior impacto do
+-- sistema (superadmin enxerga/administra TODAS as empresas), esse é
+-- exatamente o cenário onde revogação imediata mais importa.
+--
+-- Mesmo mecanismo de 0011: "tv" no JWT (emitido no login, ver
+-- auth/login.py/api/v1/auth.py/web/routes_auth.py) comparado contra o
+-- valor atual da coluna a cada requisição (auth/dependencies.py:
+-- conexao_superadmin, web/deps.py:conexao_superadmin_web) -- incompatível
+-- (ou ausente, para um token emitido antes desta migration) derruba a
+-- sessão imediatamente.
+--
+-- Diferente de `usuarios`, não existe hoje um fluxo de "trocar a própria
+-- senha" para superadmin (só existe o script de criação inicial, ver
+-- scripts/criar_superadmin.py) -- então o gatilho para incrementar isto
+-- não é "trocou a senha", é uma ação operacional explícita: ver
+-- scripts/revogar_sessao_superadmin.py, para quando alguém (ops/segurança)
+-- precisa encerrar uma sessão de superadmin sob suspeita SEM esperar a
+-- expiração natural do cookie.
+ALTER TABLE superadmins ADD COLUMN IF NOT EXISTS token_version integer NOT NULL DEFAULT 1;

@@ -1,0 +1,58 @@
+<div id="tabela-empresas">
+  <table class="tabela">
+    <thead><tr><th>Nome</th><th>Plano</th><th>Status</th><th>Modo firewall</th><th>Modo autônomo</th><th>Criada em</th><th></th></tr></thead>
+    <tbody>
+      {% for e in empresas %}
+      <tr>
+        <td>{{ e.nome }}</td>
+        <td>{{ e.plano }}</td>
+        <td>
+          <form class="formulario-inline" hx-post="/admin/empresas/{{ e.id }}/status"
+                hx-target="#tabela-empresas" hx-swap="outerHTML">
+            <select name="status">
+              <option value="ativa" {% if e.status == "ativa" %}selected{% endif %}>ativa</option>
+              <option value="suspensa" {% if e.status == "suspensa" %}selected{% endif %}>suspensa</option>
+              <option value="cancelada" {% if e.status == "cancelada" %}selected{% endif %}>cancelada</option>
+            </select>
+            <button type="submit" class="botao-secundario">salvar</button>
+          </form>
+        </td>
+        <td>
+          <!-- Item 8 do plano de endurecimento -- kill-switch/modo de
+               firewall POR TENANT (ver services/resposta_incidentes.py). -->
+          <form class="formulario-inline" hx-post="/admin/empresas/{{ e.id }}/modo-firewall"
+                hx-target="#tabela-empresas" hx-swap="outerHTML">
+            <select name="modo_firewall">
+              <option value="observacao" {% if e.modo_firewall == "observacao" %}selected{% endif %}>observação (nunca bloqueia)</option>
+              <option value="dry_run" {% if e.modo_firewall == "dry_run" %}selected{% endif %}>dry-run (só simula)</option>
+              <option value="manual" {% if e.modo_firewall == "manual" %}selected{% endif %}>manual (sem resposta automática)</option>
+              <option value="automacao_controlada" {% if e.modo_firewall == "automacao_controlada" %}selected{% endif %}>automação controlada (nunca permanente)</option>
+              <option value="automacao_total" {% if e.modo_firewall == "automacao_total" %}selected{% endif %}>automação total</option>
+            </select>
+            <button type="submit" class="botao-secundario">salvar</button>
+          </form>
+        </td>
+        <td>
+          <!-- Modo autônomo (migrations/0014_autonomia_operacional.sql,
+               services/automacao.py) -- opt-in por tenant, decidido pelo
+               superadmin, não pelo próprio tenant. -->
+          <form class="formulario-inline" hx-post="/admin/empresas/{{ e.id }}/autonomia"
+                hx-target="#tabela-empresas" hx-swap="outerHTML">
+            <label>
+              <input type="checkbox" name="modo_firewall_auto" value="true" {% if e.modo_firewall_auto %}checked{% endif %}>
+              autoajustar modo firewall
+            </label>
+            <label>
+              <input type="checkbox" name="auto_triagem_incidentes" value="true" {% if e.auto_triagem_incidentes %}checked{% endif %}>
+              auto-triagem de incidentes
+            </label>
+            <button type="submit" class="botao-secundario">salvar</button>
+          </form>
+        </td>
+        <td>{{ e.criada_em }}</td>
+        <td><a href="/admin/empresas/{{ e.id }}/usuarios">gerenciar usuários</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

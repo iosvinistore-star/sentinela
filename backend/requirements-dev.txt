@@ -1,0 +1,8 @@
+# Ferramental de desenvolvimento local/CI: tudo de requirements-test.txt
+# (para poder rodar a suíte também) MAIS lint e security scanning
+# (auditoria V3.1, Fases 2 e 25) -- `make lint`/`make security` dependem
+# deste arquivo, nunca de requirements-test.txt sozinho.
+-r requirements-test.txt
+ruff==0.16.8
+bandit==1.9.4
+pip-audit==2.10.1

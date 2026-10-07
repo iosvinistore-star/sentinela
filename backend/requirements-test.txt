@@ -1,0 +1,10 @@
+# Dependências mínimas para RODAR a suíte de testes (pytest tests/), sem
+# nenhuma ferramenta de desenvolvimento (lint/security scanning) junto --
+# separado de requirements-dev.txt por pedido explícito da auditoria V3.1
+# (Fase 1): um pipeline de CI que só precisa RODAR testes não deveria
+# precisar instalar Bandit/ruff/pip-audit também, e vice-versa.
+-r requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+httpx==0.28.1

@@ -1,0 +1,106 @@
+:root {
+  --cor-fundo: #0f1420;
+  --cor-superficie: #161d2e;
+  --cor-borda: #2a3348;
+  --cor-texto: #e4e8f1;
+  --cor-texto-suave: #8b93a7;
+  --cor-primaria: #4f8cff;
+  --cor-perigo: #ff5d5d;
+  --cor-sucesso: #3ecf8e;
+  --cor-aviso: #f5a623;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--cor-fundo);
+  color: var(--cor-texto);
+}
+
+.topo {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--cor-superficie);
+  border-bottom: 1px solid var(--cor-borda);
+}
+
+.marca { color: var(--cor-texto); text-decoration: none; font-weight: 700; font-size: 1.1rem; }
+
+.nav-principal { display: flex; gap: 1.25rem; flex: 1; }
+.nav-principal a { color: var(--cor-texto-suave); text-decoration: none; }
+.nav-principal a:hover { color: var(--cor-texto); }
+
+.usuario-atual { display: flex; align-items: center; gap: 0.75rem; color: var(--cor-texto-suave); font-size: 0.9rem; }
+
+.conteudo { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+h1 { margin-top: 0; }
+
+.caixa-login {
+  max-width: 380px;
+  margin: 4rem auto;
+  background: var(--cor-superficie);
+  border: 1px solid var(--cor-borda);
+  border-radius: 12px;
+  padding: 2rem;
+}
+.subtitulo { color: var(--cor-texto-suave); margin-top: -0.5rem; }
+
+.formulario { display: flex; flex-direction: column; gap: 0.9rem; }
+.formulario-inline { flex-direction: row; align-items: flex-end; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+.formulario-linha { display: flex; gap: 0.5rem; align-items: center; }
+.formulario-filtro { margin-bottom: 1rem; }
+/* Item 18 do plano de endurecimento -- era um style="max-width: 360px"
+   inline em usuarios/minha_conta.html; movido pra cá porque a CSP estrita
+   (style-src 'self', sem 'unsafe-inline' -- ver web/security_headers.py)
+   bloquearia o atributo style="..." inline. */
+.formulario-estreito { max-width: 360px; }
+
+label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.85rem; color: var(--cor-texto-suave); }
+.rotulo-checkbox { flex-direction: row; align-items: center; gap: 0.4rem; }
+
+input, select, textarea, button {
+  font: inherit;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--cor-borda);
+  background: var(--cor-fundo);
+  color: var(--cor-texto);
+}
+
+button { cursor: pointer; border: none; }
+.botao-primario { background: var(--cor-primaria); color: white; }
+.botao-secundario { background: var(--cor-borda); color: var(--cor-texto); }
+.botao-perigo { background: var(--cor-perigo); color: white; }
+
+.tabela { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+.tabela th, .tabela td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--cor-borda); }
+.tabela th { color: var(--cor-texto-suave); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+
+.badge { padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
+.badge-low { background: #274d3a; color: var(--cor-sucesso); }
+.badge-medium { background: #4d4327; color: var(--cor-aviso); }
+.badge-high { background: #4d2727; color: #ff9d9d; }
+.badge-critical { background: var(--cor-perigo); color: white; }
+
+.vazio { color: var(--cor-texto-suave); font-style: italic; }
+.aviso { background: #2a2413; border: 1px solid var(--cor-aviso); border-radius: 8px; padding: 0.75rem 1rem; color: var(--cor-aviso); }
+.alerta { padding: 0.6rem 0.9rem; border-radius: 6px; }
+.alerta-erro { background: #3a1f1f; border: 1px solid var(--cor-perigo); color: #ff9d9d; }
+
+.ficha { display: grid; grid-template-columns: 200px 1fr; gap: 0.4rem 1rem; margin: 1.5rem 0; }
+.ficha dt { color: var(--cor-texto-suave); }
+.ficha dd { margin: 0; }
+
+.metricas { list-style: none; display: flex; gap: 2rem; padding: 0; }
+.metricas li { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: 8px; padding: 0.75rem 1.25rem; }
+
+
+/* HTMX indicator styles */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator { display: inline-block; }

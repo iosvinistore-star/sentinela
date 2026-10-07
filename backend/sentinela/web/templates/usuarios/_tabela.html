@@ -1,0 +1,29 @@
+<div id="tabela-usuarios">
+  {% if erro %}<p class="alerta alerta-erro">{{ erro }}</p>{% endif %}
+  <table class="tabela">
+    <thead><tr><th>Email</th><th>Papel</th><th>Ativo</th><th>Criado em</th><th></th></tr></thead>
+    <tbody>
+      {% for u in usuarios %}
+      <tr>
+        <td>{{ u.email }}</td>
+        <td>{{ u.papel }}</td>
+        <td>{{ "sim" if u.ativo else "não" }}</td>
+        <td>{{ u.criado_em }}</td>
+        <td>
+          <form hx-patch="/usuarios/{{ u.id }}" hx-target="#tabela-usuarios" hx-swap="outerHTML" class="formulario-linha">
+            <select name="papel">
+              <option value="analista" {% if u.papel == "analista" %}selected{% endif %}>analista</option>
+              <option value="admin" {% if u.papel == "admin" %}selected{% endif %}>admin</option>
+            </select>
+            <select name="ativo">
+              <option value="true" {% if u.ativo %}selected{% endif %}>ativo</option>
+              <option value="false" {% if not u.ativo %}selected{% endif %}>inativo</option>
+            </select>
+            <button type="submit" class="botao-secundario">Salvar</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

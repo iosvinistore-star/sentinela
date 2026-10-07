@@ -1,0 +1,57 @@
+# Versões fixadas (==), não pisos (>=): sem isso, um "docker build" novo em
+# outra data podia puxar uma versão maior nunca testada com o resto do
+# código -- inclusive uma que quebra compatibilidade, ou introduz uma
+# regressão só descoberta em produção. Reproducibilidade > conveniência de
+# não precisar bater esse arquivo de vez em quando.
+#
+# Para atualizar deliberadamente: suba o número aqui, rode a suíte de
+# testes completa (unit + integration + api), e só então faça commit.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+asyncpg==0.31.0
+bcrypt==5.0.0
+pyjwt==2.13.0
+jinja2==3.1.6
+python-multipart==0.0.32
+requests==2.34.2
+# pydantic/starlette: GAP encontrado na auditoria V3.1 (Fase 1) -- sete
+# módulos de api/v1/*.py importam `pydantic` diretamente (BaseModel, Field,
+# field_validator) e main.py/routers importam `starlette` (TrustedHostMiddleware
+# vem de fastapi.middleware, mas exceptions/responses tocam starlette direto
+# em alguns pontos), sem que nenhum dos dois estivesse pinado aqui -- eram só
+# dependências TRANSITIVAS do fastapi, o que quebra a garantia de
+# reprodutibilidade que este arquivo documenta acima: uma versão nova do
+# fastapi poderia arrastar uma versão nova de pydantic/starlette nunca
+# testada com este código, sem que `pip install -r requirements.txt` desse
+# nenhum sinal disso. Pinados aqui nas versões já validadas pela suíte de
+# testes completa (542 testes, ver pytest.ini).
+pydantic==2.13.5
+starlette==1.6.0
+# Fase C (RBAC + MFA/TOTP): pyotp implementa RFC 6238 (TOTP) -- não
+# reinventado à mão pelo mesmo motivo que este projeto usa `bcrypt`/`pyjwt`
+# em vez de hash/JWT escritos do zero (ver auth/security.py). `cryptography`
+# fornece Fernet (AES-128-CBC + HMAC autenticado) para cifrar o segredo TOTP
+# em repouso (auth/mfa.py) -- ao contrário de uma senha, o segredo TOTP
+# precisa ser recuperável em claro para calcular o código esperado a cada
+# validação, então bcrypt (one-way) não serve para ele; Fernet é a escolha
+# padrão da própria comunidade Python para "preciso descriptografar depois"
+# sem implementar AES/HMAC manualmente.
+pyotp==2.9.0
+cryptography==46.0.3
+# Fase E (E1, ver ARQUITETURA_OBSERVABILIDADE.md §2.1): biblioteca OFICIAL
+# do próprio projeto Prometheus -- ao contrário do formatter JSON de E2
+# (onde reimplementar à mão foi a decisão certa), aqui o formato de
+# exposição, a aritmética de histogramas e a thread-safety de contadores
+# compartilhados entre requisições concorrentes são complexos o bastante
+# para valer a pena não reinventar (mesma categoria de decisão que já
+# justificou bcrypt/pyjwt/pyotp/cryptography acima).
+prometheus-client==0.26.0
+
+# Notificação de alerta no celular (Web Push, RFC 8030 + VAPID RFC 8292 --
+# ver services/push.py). A criptografia de payload do Web Push (ECDH +
+# HKDF + AES-GCM, RFC 8291) e a assinatura VAPID são exatamente o tipo de
+# coisa que não se escreve à mão: mesma categoria de decisão que já
+# justificou bcrypt/pyjwt/pyotp/cryptography acima. Só é usada quando o
+# par de chaves VAPID existe no ambiente; sem ele o produto roda igual,
+# apenas sem notificação.
+pywebpush==2.5.0

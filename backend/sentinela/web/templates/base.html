@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block titulo %}Sentinela SOC{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/estilo.css">
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
+<script src="/static/js/htmx.min.js"></script>
+  <script src="/static/js/app.js"></script>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body{% if usuario %} hx-headers='{"X-Sentinela-CSRF": "1"}'{% endif %}>
+  <header class="topo">
+    <a class="marca" href="/">🛡️ Sentinela SOC</a>
+    {% if usuario %}
+    <nav class="nav-principal">
+      <a href="/incidentes">Incidentes</a>
+      <a href="/firewall">Firewall</a>
+      <a href="/logs/upload">Analisar log</a>
+      {% if usuario.papel == "admin" %}<a href="/usuarios">Usuários</a>{% endif %}
+      {% if usuario.papel == "superadmin" %}<a href="/admin/empresas">Empresas</a>{% endif %}
+    </nav>
+    <div class="usuario-atual">
+      <span>{{ usuario.email }} <em>({{ usuario.papel }})</em></span>
+      {% if usuario.papel == "superadmin" %}<a href="/admin/minha-conta">Minha conta</a>{% else %}<a href="/minha-conta">Minha conta</a>{% endif %}
+      <button class="botao-secundario" hx-post="/logout">Sair</button>
+    </div>
+    {% endif %}
+  </header>
+  <main class="conteudo">
+    {% block conteudo %}{% endblock %}
+  </main>
+</body>
+</html>

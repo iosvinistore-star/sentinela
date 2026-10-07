@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block titulo %}Empresas — Administração{% endblock %}
+{% block conteudo %}
+<h1>Empresas (todas)</h1>
+
+<form class="formulario formulario-inline" hx-post="/admin/empresas" hx-target="#tabela-empresas" hx-swap="outerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
+  <label>Nome <input type="text" name="nome" required></label>
+  <label>Plano <input type="text" name="plano" value="padrao"></label>
+  <button type="submit" class="botao-primario">Criar empresa</button>
+</form>
+
+{% include "admin/_tabela_empresas.html" %}
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block titulo %}Usuários — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<h1>Usuários da empresa</h1>
+
+<form class="formulario formulario-inline" hx-post="/usuarios" hx-target="#tabela-usuarios" hx-swap="outerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
+  <label>Email <input type="email" name="email" required></label>
+  <label>Papel
+    <select name="papel">
+      <option value="analista">analista</option>
+      <option value="admin">admin</option>
+    </select>
+  </label>
+  <label>Senha inicial <input type="password" name="senha" required minlength="12"></label>
+  <button type="submit" class="botao-primario">Criar usuário</button>
+</form>
+{% include "usuarios/_tabela.html" %}
+{% endblock %}

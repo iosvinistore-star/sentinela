@@ -1,0 +1,25 @@
+-- SENTINELA-COPYRIGHT-INICIO
+-- Copyright (c) 2026 Vinicius Martins. Todos os direitos reservados.
+-- Sentinela SOC -- software proprietário; uso, cópia e distribuição somente sob licença.
+-- Ver o arquivo LICENSE na raiz do projeto.
+-- SENTINELA-COPYRIGHT-FIM
+-- Permite que conexões tenant-scoped (app_tenant) leiam a própria linha em
+-- `empresas` -- necessário para checar `status` (ativa/suspensa/cancelada)
+-- em TEMPO REAL a cada requisição autenticada (ver auth/dependencies.py:
+-- conexao_tenant, e web/deps.py: conexao_tenant_web), não só no momento do
+-- login. Sem isto, uma empresa suspensa pelo superadmin não tem NENHUM
+-- efeito prático: sessões já emitidas continuam acessando tudo normalmente
+-- até o JWT expirar (até `sessao_horas` depois).
+--
+-- `empresas` deliberadamente NÃO tem RLS (ver 0003_rls.sql -- é a própria
+-- tabela que define os tenants, não faria sentido ela filtrar por tenant).
+-- Esse GRANT SELECT portanto permite, em tese, que uma conexão app_tenant
+-- leia QUALQUER linha de `empresas`, não só a sua -- mas isso é seguro
+-- porque nenhum código da aplicação expõe uma listagem ou busca livre de
+-- `empresas` numa conexão tenant-scoped: toda leitura via `conexao_tenant`/
+-- `conexao_tenant_web` é sempre `WHERE id = $1` com o `empresa_id` que veio
+-- do próprio token JWT (assinado, não forjável pelo usuário). Uma listagem
+-- real de todas as empresas só existe via `conexao_superadmin`
+-- (services/empresas.py), que já usa um GRANT equivalente em
+-- app_superadmin desde 0004_roles_grants.sql.
+GRANT SELECT ON empresas TO app_tenant;

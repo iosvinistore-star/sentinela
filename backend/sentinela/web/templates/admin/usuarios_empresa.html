@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block titulo %}Usuários de {{ empresa.nome }} — Administração{% endblock %}
+{% block conteudo %}
+<p><a href="/admin/empresas">&larr; voltar para empresas</a></p>
+<h1>Usuários de {{ empresa.nome }}</h1>
+
+<form class="formulario formulario-inline" hx-post="/admin/empresas/{{ empresa.id }}/usuarios" hx-target="#tabela-usuarios-empresa" hx-swap="outerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
+  <label>Email <input type="email" name="email" required></label>
+  <label>Papel
+    <select name="papel">
+      <option value="admin">admin</option>
+      <option value="analista">analista</option>
+    </select>
+  </label>
+  <label>Senha inicial <input type="password" name="senha" required minlength="12"></label>
+  <button type="submit" class="botao-primario">Criar usuário</button>
+</form>
+{% include "admin/_tabela_usuarios_empresa.html" %}
+{% endblock %}

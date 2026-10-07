@@ -1,0 +1,11 @@
+<div id="tabela-usuarios-empresa">
+  {% if erro %}<p class="alerta alerta-erro">{{ erro }}</p>{% endif %}
+  <table class="tabela">
+    <thead><tr><th>Email</th><th>Papel</th><th>Ativo</th><th>Criado em</th></tr></thead>
+    <tbody>
+      {% for u in usuarios %}
+      <tr><td>{{ u.email }}</td><td>{{ u.papel }}</td><td>{{ "sim" if u.ativo else "não" }}</td><td>{{ u.criado_em }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

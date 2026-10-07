@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block titulo %}{{ incidente.incident_id }} — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<p><a href="/incidentes">&larr; voltar para a lista</a></p>
+{% include "incidentes/_detalhe_conteudo.html" %}
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block titulo %}Incidentes — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<h1>Incidentes</h1>
+
+<form method="get" action="/incidentes" class="formulario-filtro">
+  <label>
+    Status
+    {# onchange="this.form.submit()" inline foi removido (ver
+       web/static/js/app.js) -- a CSP estrita bloqueia handlers de evento
+       inline; data-auto-submit é a mesma coisa via delegação de evento
+       num script externo. #}
+    <select name="status" data-auto-submit>
+      <option value="" {% if not status_filtro %}selected{% endif %}>Todos</option>
+      {% for s in status_validos %}
+        <option value="{{ s }}" {% if status_filtro == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+
+{% if incidentes %}
+<table class="tabela">
+  <thead>
+    <tr>
+      <th>ID</th><th>IP</th><th>Severidade</th><th>Score</th><th>Status</th><th>Criado em</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for i in incidentes %}
+    <tr>
+      <td><a href="/incidentes/{{ i.incident_id }}">{{ i.incident_id }}</a></td>
+      <td>{{ i.ip }}</td>
+      <td><span class="badge badge-{{ i.severidade|lower }}">{{ i.severidade }}</span></td>
+      <td>{{ i.pontuacao_risco }}</td>
+      <td>{{ i.status }}</td>
+      <td>{{ i.criado_em }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vazio">Nenhum incidente encontrado.</p>
+{% endif %}
+{% endblock %}

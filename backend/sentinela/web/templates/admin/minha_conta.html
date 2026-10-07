@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block titulo %}Minha conta — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<h1>Minha conta</h1>
+<p class="subtitulo">Trocar minha senha ({{ usuario.email }})</p>
+
+{% if sucesso %}<p class="alerta alerta-sucesso">Senha alterada com sucesso.</p>{% endif %}
+{% if erro %}<p class="alerta alerta-erro">{{ erro }}</p>{% endif %}
+
+{# Mesmo padrão de usuarios/minha_conta.html (ver o comentário lá) -- hx-post
+   porque a rota exige o header CSRF (routes_admin.py:trocar_minha_senha) e
+   um <form method=post> nativo não tem como enviar um header customizado. #}
+<form hx-post="/admin/minha-conta/senha" hx-select="body" hx-target="body" hx-swap="outerHTML"
+      class="formulario formulario-estreito">
+  <label>
+    Senha atual
+    <input type="password" name="senha_atual" required autofocus>
+  </label>
+  <label>
+    Senha nova
+    <input type="password" name="senha_nova" required minlength="12">
+  </label>
+  <button type="submit" class="botao-primario">Salvar nova senha</button>
+</form>
+{% endblock %}

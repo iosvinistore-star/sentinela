@@ -1,0 +1,31 @@
+<div class="resultado-analise">
+  <h2>Resultado</h2>
+  <ul class="metricas">
+    <li><strong>{{ relatorio.linhas_totais }}</strong> linhas analisadas</li>
+    <li><strong>{{ relatorio.total_alertas }}</strong> alertas</li>
+    <li><strong>{{ relatorio.linhas_nao_reconhecidas }}</strong> linhas não reconhecidas</li>
+  </ul>
+
+  {% if relatorio.respostas_incidentes %}
+  <h3>Incidentes criados</h3>
+  <table class="tabela">
+    <thead><tr><th>IP</th><th>Ataques</th><th>Severidade</th><th>Score</th><th>Incidente</th>{% if relatorio.respostas_incidentes[0].bloqueio is defined %}<th>Bloqueio</th>{% endif %}</tr></thead>
+    <tbody>
+      {% for r in relatorio.respostas_incidentes %}
+      <tr>
+        <td>{{ r.ip }}</td>
+        <td>{{ r.total_ataques }} ({{ r.tipos_ataque|join(", ") }})</td>
+        <td>
+          {% if r.risk %}<span class="badge badge-{{ r.risk.severity|lower }}">{{ r.risk.severity }}</span>{% endif %}
+        </td>
+        <td>{{ r.risk.score if r.risk else "—" }}</td>
+        <td>{% if r.incident_id %}<a href="/incidentes/{{ r.incident_id }}">{{ r.incident_id }}</a>{% else %}—{% endif %}</td>
+        {% if r.bloqueio is defined %}<td>{{ r.bloqueio.status }}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="vazio">Nenhum IP ultrapassou o limite configurado.</p>
+  {% endif %}
+</div>

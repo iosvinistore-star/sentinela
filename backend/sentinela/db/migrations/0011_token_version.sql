@@ -1,0 +1,32 @@
+-- SENTINELA-COPYRIGHT-INICIO
+-- Copyright (c) 2026 Vinicius Martins. Todos os direitos reservados.
+-- Sentinela SOC -- software proprietário; uso, cópia e distribuição somente sob licença.
+-- Ver o arquivo LICENSE na raiz do projeto.
+-- SENTINELA-COPYRIGHT-FIM
+-- Revogação de sessão em tempo real quando a SENHA muda (item 3 do plano de
+-- endurecimento pós-auditoria).
+--
+-- `conexao_tenant`/`conexao_tenant_web` (auth/dependencies.py, web/deps.py)
+-- já recarregam `ativo`/`papel` do banco a cada requisição -- ver
+-- 0010_endurecer_grants_app_tenant.sql e os comentários dessas duas
+-- funções -- mas isso NÃO cobre troca de senha: até agora, trocar a
+-- própria senha (ou usar o link de "esqueci minha senha") não invalidava
+-- nenhuma sessão já aberta em OUTRO navegador/dispositivo com o cookie
+-- antigo. Alguém que perdeu acesso a uma sessão comprometida (ex.: cookie
+-- vazado, computador compartilhado) e trocou a senha continuava exposto
+-- pelas próximas `sessao_horas` até o cookie roubado expirar sozinho.
+--
+-- `token_version` é um contador simples: incrementado toda vez que a senha
+-- muda (services/usuarios.py:trocar_propria_senha e
+-- services/redefinicao_senha.py:confirmar_redefinicao), gravado como claim
+-- "tv" no JWT na emissão (login), e comparado contra o valor atual do
+-- banco a cada requisição tenant-scoped. Qualquer sessão emitida ANTES do
+-- incremento (token "tv" desatualizado, ou nem tem a claim -- sessões
+-- emitidas antes desta migration) passa a falhar a checagem imediatamente
+-- na próxima requisição -- mesmo mecanismo/efeito de `ativo=false`.
+--
+-- Superadmins ficam de fora de propósito: o mesmo motivo que
+-- `exigir_superadmin`/`conexao_superadmin` já não fazem o recheque de
+-- ativo/papel que `conexao_tenant` faz (superadmins não têm `ativo`, é
+-- uma tabela separada e bem menor, gerida só por operação/CLI).
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS token_version integer NOT NULL DEFAULT 1;

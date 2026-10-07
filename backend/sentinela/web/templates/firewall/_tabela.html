@@ -1,0 +1,27 @@
+<div id="tabela-bloqueios">
+  {% if bloqueios %}
+  <table class="tabela">
+    <thead><tr><th>IP</th><th>Motivo</th><th>Status</th><th>Ainda ativo no kernel?</th><th>Bloqueado em</th>{% if usuario.papel == "admin" %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for b in bloqueios %}
+      <tr>
+        <td>{{ b.ip }}</td>
+        <td>{{ b.motivo }}</td>
+        <td>{{ b.status }}</td>
+        <td>{{ "sim" if b.ainda_ativo_no_kernel else "não" }}</td>
+        <td>{{ b.bloqueado_em }}</td>
+        {% if usuario.papel == "admin" %}
+        <td>
+          <button class="botao-perigo" hx-delete="/firewall/bloqueios/{{ b.ip }}"
+                  hx-target="#tabela-bloqueios" hx-swap="outerHTML"
+                  hx-confirm="Remover o bloqueio de {{ b.ip }}?">Remover</button>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="vazio">Nenhum bloqueio ativo registrado por esta empresa.</p>
+  {% endif %}
+</div>

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block titulo %}Redefinir senha — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<div class="caixa-login">
+  <h1>🛡️ Sentinela SOC</h1>
+  <p class="subtitulo">Escolher uma senha nova</p>
+
+  {% if sucesso %}
+    <p class="alerta alerta-sucesso">Senha redefinida com sucesso.</p>
+    <p><a href="/login">Ir para o login</a></p>
+  {% else %}
+    {% if erro %}<p class="alerta alerta-erro">{{ erro }}</p>{% endif %}
+    {# Mesmo raciocínio do formulário em esqueci_senha.html: hx-headers
+       estático direto no form (não depende de `usuario`, que aqui é
+       sempre None -- é assim que se chega a esta página). #}
+    <form hx-post="/redefinir-senha" hx-headers='{"X-Sentinela-CSRF": "1"}'
+          hx-select="body" hx-target="body" hx-swap="outerHTML" class="formulario">
+      <input type="hidden" name="token" value="{{ token }}">
+      <label>
+        Senha nova
+        {# minlength precisa bater com a validação do servidor
+           (routes_auth.py:submeter_redefinir_senha exige >= 12). #}
+        <input type="password" name="senha_nova" required minlength="12" autofocus>
+      </label>
+      <button type="submit" class="botao-primario">Salvar nova senha</button>
+    </form>
+    <p><a href="/esqueci-senha">Pedir um novo link</a></p>
+  {% endif %}
+</div>
+{% endblock %}

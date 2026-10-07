@@ -1,0 +1,30 @@
+# Config do `make lint`/`scripts/lint.sh` (auditoria V3.1, Fase 2).
+#
+# Este é o PRIMEIRO lint que o projeto ganha -- por isso o conjunto de
+# regras é deliberadamente conservador: pyflakes (F, bugs reais -- import
+# não usado, variável não definida, etc.) e nomes de variável ambíguos
+# (E741, ex.: `l`/`O`/`I`, fáceis de confundir com 1/0 na leitura), em vez
+# do ruleset "recomendado" completo do ruff. Um projeto de ~9k linhas nunca
+# lintado que de repente reprova em centenas de regras de estilo (import
+# sorting, docstrings, etc.) não ajuda ninguém -- só gera ruído que ou é
+# ignorado, ou vira uma reescrita cosmética em massa de arquivos que já
+# funcionam, o que o próprio escopo da V3.1 pede para EVITAR (item 2 do
+# escopo: "não reescrever o projeto do zero", "evitar mudanças
+# desnecessárias"). Regras adicionais podem ser habilitadas depois,
+# arquivo por arquivo, à medida que cada área for revisitada por outro
+# motivo -- não como uma reformatação em massa.
+line-length = 160
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    # E501 (linha longa) e E702 (múltiplos statements com ";") já existiam
+    # em pouquíssimos lugares (core/correlacao.py, monitor.py, cli.py) antes
+    # deste lint existir -- são estilo, não bugs, e corrigi-los significaria
+    # reescrever trechos de arquivos existentes só por causa do lint, não
+    # por uma necessidade funcional. Ignorados deliberadamente aqui em vez
+    # de espalhar `# noqa` por arquivos que, do contrário, não precisariam
+    # de nenhuma alteração.
+    "E501",
+    "E702",
+]

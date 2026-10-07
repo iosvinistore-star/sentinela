@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block titulo %}Firewall — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<h1>Firewall</h1>
+<p class="aviso">
+  ⚠️ O bloqueio via ipset/iptables é a nível de HOST, não por empresa: bloquear um IP aqui
+  bloqueia para todas as empresas que compartilham este servidor. Por isso só administradores
+  podem bloquear/remover.
+</p>
+
+{% if usuario.papel == "admin" %}
+<form class="formulario formulario-inline" hx-post="/firewall/bloqueios" hx-target="#tabela-bloqueios" hx-swap="outerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
+  <label>IP <input type="text" name="ip" placeholder="203.0.113.10" required></label>
+  <label>Motivo <input type="text" name="motivo" placeholder="ex.: varredura detectada" required></label>
+  <label>Duração (horas, 0 = permanente) <input type="number" name="duracao_horas" value="24" min="0" step="1"></label>
+  <button type="submit" class="botao-primario">Bloquear</button>
+</form>
+{% endif %}
+
+{% include "firewall/_tabela.html" %}
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block titulo %}Esqueci minha senha — Sentinela SOC{% endblock %}
+{% block conteudo %}
+<div class="caixa-login">
+  <h1>🛡️ Sentinela SOC</h1>
+  <p class="subtitulo">Esqueci minha senha</p>
+
+  {% if enviado %}
+    <p class="alerta alerta-sucesso">
+      Se esse email estiver cadastrado, enviamos um link de redefinição de senha para ele
+      (válido por 1 hora). Confira sua caixa de entrada (e o spam).
+    </p>
+    <p><a href="/login">Voltar para o login</a></p>
+  {% else %}
+    {% if erro %}<p class="alerta alerta-erro">{{ erro }}</p>{% endif %}
+    {# hx-headers aqui (não no <body>, que só o carrega se `usuario` --
+       este formulário é usado por gente SEM sessão) é o que permite exigir
+       o header CSRF (ver auth/dependencies.exigir_csrf_header e
+       web/routes_auth.py:submeter_esqueci_senha) sem o problema de
+       "ovo e galinha" do /login: aqui não há cookie de sessão em jogo, só
+       um header estático que qualquer visitante da página já carrega.
+       hx-select="body" + hx-target="body" troca a página inteira pelo
+       <body> da resposta (sucesso ou erro), preservando o comportamento de
+       antes de re-renderizar a página completa. #}
+    <form hx-post="/esqueci-senha" hx-headers='{"X-Sentinela-CSRF": "1"}'
+          hx-select="body" hx-target="body" hx-swap="outerHTML" class="formulario">
+      <label>
+        Email
+        <input type="email" name="email" required autofocus>
+      </label>
+      <button type="submit" class="botao-primario">Enviar link de redefinição</button>
+    </form>
+    <p><a href="/login">Voltar para o login</a></p>
+  {% endif %}
+</div>
+{% endblock %}

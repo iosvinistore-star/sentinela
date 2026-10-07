@@ -1,0 +1,37 @@
+-- SENTINELA-COPYRIGHT-INICIO
+-- Copyright (c) 2026 Vinicius Martins. Todos os direitos reservados.
+-- Sentinela SOC -- software proprietário; uso, cópia e distribuição somente sob licença.
+-- Ver o arquivo LICENSE na raiz do projeto.
+-- SENTINELA-COPYRIGHT-FIM
+-- Endurece os GRANTs de app_tenant (0004_roles_grants.sql concedia
+-- SELECT, INSERT, UPDATE, DELETE em incidentes, bloqueios_firewall,
+-- auditoria e usuarios de uma vez só, "pra simplificar").
+--
+-- Levantamento do que o código de verdade usa nessas quatro tabelas via
+-- conexao_tenant (app_tenant), varrendo services/*.py:
+--   incidentes         -- SELECT, INSERT, UPDATE (services/incidentes.py:
+--                          atualizar_status). Nenhum DELETE FROM em lugar
+--                          nenhum do projeto.
+--   bloqueios_firewall  -- SELECT, INSERT, UPDATE (services/firewall.py:
+--                          remover_bloqueio marca status='removido' em vez
+--                          de apagar a linha -- histórico de bloqueios é
+--                          intencionalmente preservado). Nenhum DELETE.
+--   usuarios            -- SELECT, INSERT, UPDATE (services/usuarios.py:
+--                          "excluir" um usuário já é ativo=false, não uma
+--                          linha apagada). Nenhum DELETE.
+--   auditoria           -- SELECT, INSERT apenas (services/auditoria.py:
+--                          registrar_evento só faz INSERT; toda leitura é
+--                          SELECT). Nenhum UPDATE nem DELETE -- e não
+--                          deveria haver: é o log de auditoria, alguém com
+--                          acesso de aplicação comprometido (ex.: uma
+--                          injeção de SQL em qualquer rota tenant-scoped)
+--                          hoje conseguiria apagar ou reescrever o próprio
+--                          rastro que a auditoria existe pra preservar.
+--
+-- Princípio do menor privilégio: revoga o que nenhum caminho de código
+-- usa. app_superadmin mantém o grant amplo de antes -- é usado só por
+-- operações administrativas (ex.: scripts/CLI de manutenção), não pelo
+-- tráfego normal da aplicação, e o BYPASSRLS já assume um nível de
+-- confiança maior.
+REVOKE DELETE ON incidentes, bloqueios_firewall, usuarios FROM app_tenant;
+REVOKE UPDATE, DELETE ON auditoria FROM app_tenant;
