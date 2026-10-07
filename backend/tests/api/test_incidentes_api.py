@@ -6,16 +6,15 @@
 """GET/PATCH /api/v1/incidentes/..."""
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar_um
 
 pytestmark = pytest.mark.integration
 
 
-async def _criar_incidente_direto(pool, empresa_id, ip="203.0.113.70"):
-    async with superadmin_scoped_connection(pool) as conn:
-        row = await conn.fetchrow(
-            """
+async def _criar_incidente_direto(db, empresa_id, ip="203.0.113.70"):
+    async with db.superadmin_session() as conn:
+        row = await buscar_um(conn, """
             INSERT INTO incidentes (empresa_id, incident_id, ip, severidade, pontuacao_risco, ataques)
             VALUES ($1, $2, $3, 'HIGH', 70, '["SQL Injection (SQLi)"]'::jsonb)
             RETURNING incident_id
@@ -26,8 +25,8 @@ async def _criar_incidente_direto(pool, empresa_id, ip="203.0.113.70"):
 
 
 @pytest.mark.asyncio
-async def test_listar_e_obter_incidente(client, usuario_de_teste, pool):
-    incident_id = await _criar_incidente_direto(pool, usuario_de_teste["empresa_id"])
+async def test_listar_e_obter_incidente(client, usuario_de_teste, db):
+    incident_id = await _criar_incidente_direto(db, usuario_de_teste["empresa_id"])
     await logar(client, usuario_de_teste["email"], usuario_de_teste["senha"])
 
     resp_lista = await client.get("/api/v1/incidentes")
@@ -47,8 +46,8 @@ async def test_obter_incidente_inexistente_e_404(client, usuario_de_teste):
 
 
 @pytest.mark.asyncio
-async def test_atualizar_status_com_sucesso(client, usuario_de_teste, pool):
-    incident_id = await _criar_incidente_direto(pool, usuario_de_teste["empresa_id"], ip="203.0.113.71")
+async def test_atualizar_status_com_sucesso(client, usuario_de_teste, db):
+    incident_id = await _criar_incidente_direto(db, usuario_de_teste["empresa_id"], ip="203.0.113.71")
     await logar(client, usuario_de_teste["email"], usuario_de_teste["senha"])
 
     resp = await client.patch(
@@ -61,8 +60,8 @@ async def test_atualizar_status_com_sucesso(client, usuario_de_teste, pool):
 
 
 @pytest.mark.asyncio
-async def test_atualizar_status_invalido_e_422(client, usuario_de_teste, pool):
-    incident_id = await _criar_incidente_direto(pool, usuario_de_teste["empresa_id"], ip="203.0.113.72")
+async def test_atualizar_status_invalido_e_422(client, usuario_de_teste, db):
+    incident_id = await _criar_incidente_direto(db, usuario_de_teste["empresa_id"], ip="203.0.113.72")
     await logar(client, usuario_de_teste["email"], usuario_de_teste["senha"])
 
     resp = await client.patch(
@@ -74,8 +73,8 @@ async def test_atualizar_status_invalido_e_422(client, usuario_de_teste, pool):
 
 
 @pytest.mark.asyncio
-async def test_analista_tambem_pode_triar_incidente(client, analista_de_teste, pool):
-    incident_id = await _criar_incidente_direto(pool, analista_de_teste["empresa_id"], ip="203.0.113.73")
+async def test_analista_tambem_pode_triar_incidente(client, analista_de_teste, db):
+    incident_id = await _criar_incidente_direto(db, analista_de_teste["empresa_id"], ip="203.0.113.73")
     await logar(client, analista_de_teste["email"], analista_de_teste["senha"])
 
     resp = await client.patch(

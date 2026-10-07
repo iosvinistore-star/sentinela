@@ -146,11 +146,11 @@ async def obter_incidente(sessao, empresa_id, incident_id: str):
     """
     O `WHERE empresa_id = $1` abaixo é redundante com a RLS da tabela
     `incidentes` (a conexão já está escopada para uma única empresa por
-    `tenant_scoped_connection` -- sem RLS, isto já bastaria pra vazar
+    `Database.tenant_session` -- sem RLS, isto já bastaria pra vazar
     incidentes de outra empresa por `incident_id` adivinhado/enumerado).
     Mantido mesmo assim como defesa em profundidade: se um dia a RLS for
     removida por engano, ou a conexão passada aqui não estiver mais
-    corretamente escopada (ex.: um `superadmin_scoped_connection` usado por
+    corretamente escopada (ex.: um `Database.superadmin_session` usado por
     engano numa rota que deveria ser tenant-only), esta cláusula sozinha já
     impede o vazamento entre empresas, em vez de depender só de uma camada.
     """

@@ -10,7 +10,7 @@ para uma máquina com um token de longa duração, não um humano com senha.
 Mesmo problema de "ovo e galinha" do login: RLS em `agentes` exige um
 tenant já setado, mas no momento em que só temos o token ainda não sabemos
 a empresa. Resolvido do mesmo jeito -- uma busca via
-`superadmin_scoped_connection` (BYPASSRLS), indexada, aqui pelo PREFIXO do
+`Database.superadmin_session` (BYPASSRLS), indexada, aqui pelo PREFIXO do
 token (não pelo token inteiro, que só existe em hash).
 
 Formato do token: "agt_<prefixo 12 hex>_<segredo 43 chars url-safe>".
@@ -60,7 +60,7 @@ def extrair_prefixo(token: str) -> str | None:
     return prefixo
 
 
-async def autenticar_agente(pool, token: str) -> dict | None:
+async def autenticar_agente(db, token: str) -> dict | None:
     """
     Retorna {"agente_id", "empresa_id", "hostname"} se o token bater com um
     agente com status='ativo', ou None. Nunca levanta exceção por token
@@ -72,7 +72,7 @@ async def autenticar_agente(pool, token: str) -> dict | None:
     # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
     agente = None
     if prefixo is not None:
-        async with pool.superadmin_session() as sessao:
+        async with db.superadmin_session() as sessao:
             agente = await AgenteRepositorio(sessao).buscar_ativo_por_prefixo(prefixo)
     token_valido = await asyncio.to_thread(
         verificar_senha, token, agente["token_hash"] if agente else _HASH_DUMMY

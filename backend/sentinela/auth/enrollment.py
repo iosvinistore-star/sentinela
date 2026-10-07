@@ -18,7 +18,7 @@ tabela, prefixo ou hash com `agentes`/`licencas`.
 Mesmo problema de "ovo e galinha" do login/agentes/licenças: RLS em
 `agentes_enrollment_tokens` exige um tenant já setado, mas no momento em
 que só temos o token ainda não sabemos a empresa. Resolvido do mesmo jeito
--- uma busca via `superadmin_scoped_connection` (BYPASSRLS), indexada pelo
+-- uma busca via `Database.superadmin_session` (BYPASSRLS), indexada pelo
 PREFIXO do token.
 
 Formato do token: "enr_<prefixo 12 hex>_<segredo 43 chars url-safe>".
@@ -61,7 +61,7 @@ def extrair_prefixo(token: str) -> str | None:
     return prefixo
 
 
-async def autenticar_enrollment(pool, token: str) -> dict | None:
+async def autenticar_enrollment(db, token: str) -> dict | None:
     """
     Retorna {"enrollment_id", "empresa_id", "status", "expira_em",
     "max_usos", "usos"} se o token bater com um token de enrollment
@@ -80,7 +80,7 @@ async def autenticar_enrollment(pool, token: str) -> dict | None:
     # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
     registro = None
     if prefixo is not None:
-        async with pool.superadmin_session() as sessao:
+        async with db.superadmin_session() as sessao:
             registro = await EnrollmentRepositorio(sessao).buscar_por_prefixo(prefixo)
     token_valido = await asyncio.to_thread(
         verificar_senha, token, registro["token_hash"] if registro else _HASH_DUMMY

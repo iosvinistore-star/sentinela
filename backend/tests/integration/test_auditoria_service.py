@@ -12,17 +12,17 @@ na tabela `auditoria`.
 
 import pytest
 
-from sentinela.db.pool import tenant_scoped_connection
 from sentinela.services import auditoria as servico
+from tests.sql_cru import buscar_um
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_registrar_evento_mascara_campo_sensivel_em_detalhes(pool, empresa_factory):
+async def test_registrar_evento_mascara_campo_sensivel_em_detalhes(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Auditoria Mascaramento")
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         evento = await servico.registrar_evento(
             conn, empresa_id, "teste.evento_sensivel",
             detalhes={"email": "a@b.com", "senha_nova": "hunter2", "token": "eyJabc.def.ghi"},
@@ -36,19 +36,18 @@ async def test_registrar_evento_mascara_campo_sensivel_em_detalhes(pool, empresa
     # a linha gravada no banco (não só o dict devolvido em memória) também
     # não contém o valor bruto -- o que importa de verdade é o que fica
     # persistido, já que é dali que um vazamento por dump/backup viria.
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
-        linha = await conn.fetchrow(
-            "SELECT detalhes::text AS detalhes_texto FROM auditoria WHERE acao = 'teste.evento_sensivel'"
+    async with db.tenant_session(empresa_id) as conn:
+        linha = await buscar_um(conn, "SELECT detalhes::text AS detalhes_texto FROM auditoria WHERE acao = 'teste.evento_sensivel'"
         )
     assert "hunter2" not in linha["detalhes_texto"]
     assert "eyJabc.def.ghi" not in linha["detalhes_texto"]
 
 
 @pytest.mark.asyncio
-async def test_registrar_evento_preserva_detalhes_sem_campo_sensivel(pool, empresa_factory):
+async def test_registrar_evento_preserva_detalhes_sem_campo_sensivel(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Auditoria Sem Segredo")
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         evento = await servico.registrar_evento(
             conn, empresa_id, "teste.evento_normal",
             detalhes={"ip": "203.0.113.10", "motivo": "teste comum"},

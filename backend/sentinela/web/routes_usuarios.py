@@ -18,23 +18,23 @@ _PAPEIS_VALIDOS = {"admin", "analista"}
 
 
 @router.get("/usuarios")
-async def listar(request: Request, usuario: dict = Depends(exigir_papel_web("admin")), conn=Depends(conexao_tenant_web)):
-    usuarios = await servico.listar_usuarios(conn)
+async def listar(request: Request, usuario: dict = Depends(exigir_papel_web("admin")), sessao=Depends(conexao_tenant_web)):
+    usuarios = await servico.listar_usuarios(sessao)
     return templates.TemplateResponse(request, "usuarios/lista.html", {"usuario": usuario, "usuarios": usuarios, "erro": None})
 
 
 @router.post("/usuarios", dependencies=[Depends(exigir_csrf_header)])
 async def criar(request: Request, email: str = Form(...), papel: str = Form(...), senha: str = Form(...),
-                  usuario: dict = Depends(exigir_papel_web("admin")), conn=Depends(conexao_tenant_web)):
+                  usuario: dict = Depends(exigir_papel_web("admin")), sessao=Depends(conexao_tenant_web)):
     if papel not in _PAPEIS_VALIDOS:
         raise HTTPException(status_code=422, detail="papel inválido")
     try:
-        criado = await servico.criar_usuario(conn, usuario["empresa_id"], email, papel, senha, ator_usuario_id=usuario["sub"])
+        criado = await servico.criar_usuario(sessao, usuario["empresa_id"], email, papel, senha, ator_usuario_id=usuario["sub"])
         erro_validacao = None
     except ValueError as exc:
         criado = None
         erro_validacao = str(exc)
-    usuarios = await servico.listar_usuarios(conn)
+    usuarios = await servico.listar_usuarios(sessao)
     # Sempre 200 aqui (mesmo em erro de validação) -- por padrão o htmx NÃO
     # troca o DOM em respostas fora da faixa 2xx, então um 409 faria a
     # mensagem de erro nunca aparecer pro usuário. A API JSON
@@ -46,18 +46,18 @@ async def criar(request: Request, email: str = Form(...), papel: str = Form(...)
 
 @router.patch("/usuarios/{usuario_id}", dependencies=[Depends(exigir_csrf_header)])
 async def atualizar(usuario_id: str, request: Request, papel: str = Form(...), ativo: str = Form(...),
-                      usuario: dict = Depends(exigir_papel_web("admin")), conn=Depends(conexao_tenant_web)):
+                      usuario: dict = Depends(exigir_papel_web("admin")), sessao=Depends(conexao_tenant_web)):
     if papel not in _PAPEIS_VALIDOS:
         raise HTTPException(status_code=422, detail="papel inválido")
     await servico.atualizar_usuario(
-        conn, usuario["empresa_id"], usuario_id, papel=papel, ativo=(ativo == "true"), ator_usuario_id=usuario["sub"],
+        sessao, usuario["empresa_id"], usuario_id, papel=papel, ativo=(ativo == "true"), ator_usuario_id=usuario["sub"],
     )
-    usuarios = await servico.listar_usuarios(conn)
+    usuarios = await servico.listar_usuarios(sessao)
     return templates.TemplateResponse(request, "usuarios/_tabela.html", {"usuario": usuario, "usuarios": usuarios})
 
 
 @router.get("/minha-conta")
-async def minha_conta(request: Request, usuario: dict = Depends(exigir_login_web), conn=Depends(conexao_tenant_web)):
+async def minha_conta(request: Request, usuario: dict = Depends(exigir_login_web), sessao=Depends(conexao_tenant_web)):
     """Correção de bug encontrado em revisão crítica (2026-09, achado 6) --
     espelha routes_admin.py:minha_conta (ver o comentário lá para o
     cenário completo). Esta rota só de leitura dependia SÓ de
@@ -73,7 +73,7 @@ async def minha_conta(request: Request, usuario: dict = Depends(exigir_login_web
 
 @router.post("/minha-conta/senha", dependencies=[Depends(exigir_csrf_header)])
 async def trocar_minha_senha(request: Request, senha_atual: str = Form(...), senha_nova: str = Form(...),
-                               usuario: dict = Depends(exigir_login_web), conn=Depends(conexao_tenant_web)):
+                               usuario: dict = Depends(exigir_login_web), sessao=Depends(conexao_tenant_web)):
     limitador = request.app.state.limitador_login
     # Chave por USUÁRIO (não por IP, ao contrário do login): quem já tem
     # uma sessão válida desse usuário pode estar em qualquer IP (cookie
@@ -100,7 +100,7 @@ async def trocar_minha_senha(request: Request, senha_atual: str = Form(...), sen
             "usuario": usuario, "sucesso": False, "erro": "A senha nova não pode ter mais de 72 caracteres.",
         })
 
-    novo_tv = await servico.trocar_propria_senha(conn, usuario["sub"], senha_atual, senha_nova)
+    novo_tv = await servico.trocar_propria_senha(sessao, usuario["sub"], senha_atual, senha_nova)
     if novo_tv is not None:
         await limitador.registrar_sucesso(chave)
     erro = None if novo_tv is not None else "Senha atual incorreta."

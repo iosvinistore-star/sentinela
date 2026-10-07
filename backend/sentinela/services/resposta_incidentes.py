@@ -146,7 +146,7 @@ async def responder_a_incidentes(
         # ataque real já processados antes dele (a lista é ordenada por
         # mais ativo primeiro -- o pior lugar possível pra um item
         # problemático travar o lote). `conn.transaction()`, chamado dentro
-        # de uma transação já aberta (ver db/pool.tenant_scoped_connection),
+        # de uma transação já aberta (ver db/pool.Database.tenant_session),
         # vira automaticamente um SAVEPOINT no asyncpg -- uma falha aqui dá
         # ROLLBACK só até esse ponto, sem invalidar a transação externa
         # (que ficaria travada em "current transaction is aborted" para

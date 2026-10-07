@@ -4,7 +4,7 @@
 # Ver o arquivo LICENSE na raiz do projeto.
 # SENTINELA-COPYRIGHT-FIM
 """Acesso a dados de `superadmins` (contas da plataforma SaaS)."""
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sentinela.models import Superadmin
@@ -60,3 +60,16 @@ class SuperadminRepositorio(RepositorioBase):
 
     async def existe_algum(self) -> bool:
         return (await self.sessao.execute(select(Superadmin.id).limit(1))).first() is not None
+
+    async def travar_transacao(self, chave: int) -> None:
+        """Lock consultivo até o fim da transação (serializa fluxos únicos, ex.: o primeiro acesso)."""
+        await self.sessao.execute(text("SELECT pg_advisory_xact_lock(:chave)"), {"chave": chave})
+
+    async def revogar_sessoes_por_email(self, email: str) -> int | None:
+        """Incrementa `token_version` (invalida toda sessão aberta). Devolve o novo valor, ou None se o e-mail não existe."""
+        stmt = (
+            update(Superadmin).where(Superadmin.email == email)
+            .values(token_version=Superadmin.token_version + 1)
+            .returning(Superadmin.token_version).execution_options(synchronize_session=False)
+        )
+        return (await self.sessao.execute(stmt)).scalar_one_or_none()

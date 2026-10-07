@@ -53,12 +53,12 @@ async def executar_retencao_siem(db, hot_days: int = 90, cold_days: int = 365,
     return {"arquivados": arquivados, "expirados": expirados}
 
 
-async def rodar_retencao_siem_periodicamente(pool, intervalo_horas: int = 24, hot_days: int = 90, cold_days: int = 365):
+async def rodar_retencao_siem_periodicamente(db, intervalo_horas: int = 24, hot_days: int = 90, cold_days: int = 365):
     """Loop de retenção; falha de uma execução não derruba o processo."""
     intervalo = max(3600, intervalo_horas * 3600)
     while True:
         try:
-            resultado = await executar_retencao_siem(pool, hot_days, cold_days)
+            resultado = await executar_retencao_siem(db, hot_days, cold_days)
             log.info("Retenção SIEM executada: %s", resultado)
         except asyncio.CancelledError:
             raise

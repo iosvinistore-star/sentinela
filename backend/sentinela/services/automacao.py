@@ -285,7 +285,7 @@ async def listar_ips_protegidos_para_whitelist(sessao, empresa_id):
     return await IpProtegidoRepositorio(sessao).listar_enderecos(empresa_id)
 
 
-async def executar_ciclo_autonomo(pool):
+async def executar_ciclo_autonomo(db):
     """
     Iteração cross-tenant com BYPASSRLS (mesmo padrão de
     services/firewall.py:sincronizar_bloqueios_expirados), uma
@@ -293,13 +293,13 @@ async def executar_ciclo_autonomo(pool):
     ciclo das outras. Só considera empresas ativas com pelo menos uma das
     duas flags de autonomia ligada.
     """
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         empresas_elegiveis = await EmpresaRepositorio(sessao).listar_ids_com_autonomia()
 
     resultado = {"empresas_processadas": 0, "ajustes_modo": [], "triagens": [], "erros": []}
     for empresa_id in empresas_elegiveis:
         try:
-            async with pool.superadmin_session() as sessao:
+            async with db.superadmin_session() as sessao:
                 ajuste = await avaliar_e_ajustar_modo_firewall(sessao, empresa_id)
                 if ajuste:
                     resultado["ajustes_modo"].append({"empresa_id": str(empresa_id), **ajuste})
@@ -314,7 +314,7 @@ async def executar_ciclo_autonomo(pool):
     return resultado
 
 
-async def rodar_ciclo_autonomo_periodicamente(pool, intervalo_segundos: int = 900):
+async def rodar_ciclo_autonomo_periodicamente(db, intervalo_segundos: int = 900):
     """
     Loop em background iniciado no lifespan (ver main.py) -- roda
     `executar_ciclo_autonomo` a cada `intervalo_segundos` (default 15min)
@@ -327,7 +327,7 @@ async def rodar_ciclo_autonomo_periodicamente(pool, intervalo_segundos: int = 90
     while True:
         try:
             await asyncio.sleep(intervalo_segundos)
-            await executar_ciclo_autonomo(pool)
+            await executar_ciclo_autonomo(db)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 -- um ciclo com erro não deve matar o loop inteiro

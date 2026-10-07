@@ -91,7 +91,7 @@ async def registrar_bloqueio(sessao, empresa_id, ip: str, motivo: str, whitelist
     return {"empresa_id": str(empresa_id), "ip": ip, "incidente_id": incidente_id, **resultado_kernel}
 
 
-async def remover_bloqueio(sessao, pool, empresa_id, ip: str, origem: str = "api", usuario_id=None):
+async def remover_bloqueio(sessao, db, empresa_id, ip: str, origem: str = "api", usuario_id=None):
     """
     `pool` (além de `sessao`, tenant-scoped) é necessário por causa da mesma
     LIMITAÇÃO CONHECIDA do topo do arquivo -- o enforcement no kernel é
@@ -152,7 +152,7 @@ async def remover_bloqueio(sessao, pool, empresa_id, ip: str, origem: str = "api
             "motivo": "nenhum bloqueio ativo desta empresa para este IP",
         }
 
-    async with pool.superadmin_session() as sessao_su:
+    async with db.superadmin_session() as sessao_su:
         outra_empresa_depende = await FirewallRepositorio(sessao_su).outra_empresa_depende(empresa_id, ip)
 
     if outra_empresa_depende:
@@ -212,7 +212,7 @@ async def listar_bloqueios(sessao, empresa_id):
     return resultado
 
 
-async def sincronizar_bloqueios_expirados(pool, origem: str = "limpeza_automatica"):
+async def sincronizar_bloqueios_expirados(db, origem: str = "limpeza_automatica"):
     """
     O kernel expira IPs sozinho (timeout nativo do ipset). Esta função:
     1. deixa core.firewall sincronizar seus próprios metadados locais (JSON) --
@@ -228,7 +228,7 @@ async def sincronizar_bloqueios_expirados(pool, origem: str = "limpeza_automatic
     ativos_kernel = await asyncio.to_thread(core_firewall.listar_bloqueios_ativos)
     ips_ainda_ativos = list(ativos_kernel.keys())
 
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         linhas_expiradas = await FirewallRepositorio(sessao).expirar_fora_do_kernel(ips_ainda_ativos)
 
     return {

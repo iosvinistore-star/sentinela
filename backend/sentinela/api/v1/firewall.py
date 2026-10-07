@@ -49,15 +49,15 @@ class BloquearRequest(BaseModel):
 
 
 @router.get("/bloqueios")
-async def listar_bloqueios(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return {"bloqueios": await servico.listar_bloqueios(conn, usuario["empresa_id"])}
+async def listar_bloqueios(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return {"bloqueios": await servico.listar_bloqueios(sessao, usuario["empresa_id"])}
 
 
 @router.post("/bloqueios", dependencies=[Depends(exigir_csrf_header)])
 async def registrar_bloqueio(dados: BloquearRequest, usuario: dict = Depends(exigir_papel("admin")),
-                               conn=Depends(conexao_tenant)):
+                               sessao=Depends(conexao_tenant)):
     resultado = await servico.registrar_bloqueio(
-        conn, usuario["empresa_id"], dados.ip, dados.motivo,
+        sessao, usuario["empresa_id"], dados.ip, dados.motivo,
         whitelist=dados.whitelist, dry_run=dados.dry_run, duracao_horas=dados.duracao_horas,
         origem="api", usuario_id=usuario["sub"],
     )
@@ -66,9 +66,9 @@ async def registrar_bloqueio(dados: BloquearRequest, usuario: dict = Depends(exi
 
 @router.delete("/bloqueios/{ip}", dependencies=[Depends(exigir_csrf_header)])
 async def remover_bloqueio(ip: str, request: Request, usuario: dict = Depends(exigir_papel("admin")),
-                             conn=Depends(conexao_tenant)):
+                             sessao=Depends(conexao_tenant)):
     resultado = await servico.remover_bloqueio(
-        conn, request.app.state.pool, usuario["empresa_id"], ip, origem="api", usuario_id=usuario["sub"],
+        sessao, request.app.state.db, usuario["empresa_id"], ip, origem="api", usuario_id=usuario["sub"],
     )
     return {"resultado": resultado}
 
@@ -78,23 +78,23 @@ async def remover_bloqueio(ip: str, request: Request, usuario: dict = Depends(ex
 # Transparente e reversível de propósito: um admin sempre consegue ver e
 # remover qualquer entrada, mesmo as adicionadas automaticamente.
 @router.get("/ips-protegidos")
-async def listar_ips_protegidos(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return {"ips_protegidos": await servico_automacao.listar_ips_protegidos(conn, usuario["empresa_id"])}
+async def listar_ips_protegidos(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return {"ips_protegidos": await servico_automacao.listar_ips_protegidos(sessao, usuario["empresa_id"])}
 
 
 @router.post("/ips-protegidos", dependencies=[Depends(exigir_csrf_header)])
 async def adicionar_ip_protegido(dados: ProtegerIpRequest, usuario: dict = Depends(exigir_papel("admin")),
-                                   conn=Depends(conexao_tenant)):
+                                   sessao=Depends(conexao_tenant)):
     ip_protegido = await servico_automacao.adicionar_ip_protegido(
-        conn, usuario["empresa_id"], dados.ip, motivo=dados.motivo, origem="manual",
+        sessao, usuario["empresa_id"], dados.ip, motivo=dados.motivo, origem="manual",
         criado_por_usuario_id=usuario["sub"],
     )
     return {"ip_protegido": ip_protegido}
 
 
 @router.delete("/ips-protegidos/{ip}", dependencies=[Depends(exigir_csrf_header)])
-async def remover_ip_protegido(ip: str, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    removido = await servico_automacao.remover_ip_protegido(conn, usuario["empresa_id"], ip, usuario_id=usuario["sub"])
+async def remover_ip_protegido(ip: str, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    removido = await servico_automacao.remover_ip_protegido(sessao, usuario["empresa_id"], ip, usuario_id=usuario["sub"])
     if not removido:
         raise HTTPException(status_code=404, detail="IP protegido não encontrado")
     return {"status": "removido"}

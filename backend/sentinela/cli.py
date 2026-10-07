@@ -25,7 +25,6 @@ import os
 from sentinela.config import carregar_settings
 from sentinela.core.analisador_logs import processar_arquivo_logs
 from sentinela.database import Database, DatabaseSettings
-from sentinela.db.pool import tenant_scoped_connection
 from sentinela.services.firewall import sincronizar_bloqueios_expirados
 from sentinela.services.resposta_incidentes import responder_a_incidentes
 
@@ -51,10 +50,10 @@ def _construir_parser():
 async def _executar(args):
     settings = carregar_settings()
     settings.validar()
-    pool = Database.conectar(DatabaseSettings.de_settings(settings))
+    db = Database.conectar(DatabaseSettings.de_settings(settings))
     try:
         if args.limpar_expirados:
-            resultado = await sincronizar_bloqueios_expirados(pool, origem="cli")
+            resultado = await sincronizar_bloqueios_expirados(db, origem="cli")
             print(json.dumps(resultado, indent=4, ensure_ascii=False, default=str))
             return
 
@@ -77,9 +76,9 @@ async def _executar(args):
         print(json.dumps(relatorio, indent=4, ensure_ascii=False))
 
         if args.verificar_reputacao or args.bloquear:
-            async with tenant_scoped_connection(pool, args.empresa_id) as conn:
+            async with db.tenant_session(args.empresa_id) as sessao:
                 respostas = await responder_a_incidentes(
-                    conn, args.empresa_id, relatorio,
+                    sessao, args.empresa_id, relatorio,
                     limite_ataques=args.limite,
                     verificar_reputacao=args.verificar_reputacao,
                     bloquear=args.bloquear,
@@ -96,7 +95,7 @@ async def _executar(args):
             with open(args.saida_json, "w", encoding="utf-8") as f:
                 json.dump(relatorio, f, indent=4, ensure_ascii=False, default=str)
     finally:
-        await pool.fechar()
+        await db.fechar()
 
 
 def main():

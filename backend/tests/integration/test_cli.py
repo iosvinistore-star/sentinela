@@ -12,7 +12,7 @@ import pytest
 from sentinela.cli import _executar
 from sentinela.core import firewall as core_firewall
 from sentinela.core import reputacao as core_reputacao
-from sentinela.db.pool import tenant_scoped_connection
+from tests.sql_cru import buscar
 
 pytestmark = pytest.mark.integration
 
@@ -28,7 +28,7 @@ def _args(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_cli_cria_incidente_via_empresa_id(tmp_path, monkeypatch, empresa_factory, pool):
+async def test_cli_cria_incidente_via_empresa_id(tmp_path, monkeypatch, empresa_factory, db):
     from tests.integration.conftest_db import TEST_DATABASE_URL
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
@@ -63,8 +63,8 @@ async def test_cli_cria_incidente_via_empresa_id(tmp_path, monkeypatch, empresa_
             arquivo=str(log), empresa_id=str(empresa_id), limite=1, verificar_reputacao=True,
         ))
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
-        linhas = await conn.fetch("SELECT ip FROM incidentes WHERE empresa_id = $1", empresa_id)
+    async with db.tenant_session(empresa_id) as conn:
+        linhas = await buscar(conn, "SELECT ip FROM incidentes WHERE empresa_id = $1", empresa_id)
     assert len(linhas) == 1
     assert str(linhas[0]["ip"]) == "203.0.113.50"
 

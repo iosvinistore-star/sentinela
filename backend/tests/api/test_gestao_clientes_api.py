@@ -17,9 +17,9 @@ import secrets
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection
 from sentinela.services import chave_ativacao
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar, valor
 
 CSRF = {"X-Sentinela-CSRF": "1"}
 HEADER_ENROLLMENT = "X-Sentinela-Enrollment-Token"
@@ -42,7 +42,7 @@ def _cnpj_unico() -> str:
 
 
 @pytest.mark.asyncio
-async def test_cadastra_cliente_inteiro_e_agente_conecta(client, superadmin_de_teste, pool):
+async def test_cadastra_cliente_inteiro_e_agente_conecta(client, superadmin_de_teste, db):
     """O fluxo que a tela "Novo cliente" dispara, ponta a ponta: uma
     chamada devolve login, senha e chave -- e a chave já serve para o
     agente entrar."""
@@ -93,7 +93,7 @@ async def test_cadastra_cliente_inteiro_e_agente_conecta(client, superadmin_de_t
 
 
 @pytest.mark.asyncio
-async def test_cnpj_invalido_e_duplicado_nao_criam_empresa(client, superadmin_de_teste, pool):
+async def test_cnpj_invalido_e_duplicado_nao_criam_empresa(client, superadmin_de_teste, db):
     """Um cadastro recusado não pode deixar empresa pela metade -- foi por
     isso que a rota virou uma transação só."""
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
@@ -116,14 +116,14 @@ async def test_cnpj_invalido_e_duplicado_nao_criam_empresa(client, superadmin_de
     })
     assert repetido.status_code == 409 and f"Cliente Um {sufixo}" in repetido.json()["detail"]
 
-    async with superadmin_scoped_connection(pool) as conn:
-        nomes = await conn.fetch("SELECT nome FROM empresas WHERE nome LIKE $1", f"%{sufixo}")
+    async with db.superadmin_session() as conn:
+        nomes = await buscar(conn, "SELECT nome FROM empresas WHERE nome LIKE $1", f"%{sufixo}")
     # Só o cadastro que deu 201 existe; os dois recusados não deixaram rastro.
     assert [n["nome"] for n in nomes] == [f"Cliente Um {sufixo}"]
 
 
 @pytest.mark.asyncio
-async def test_email_duplicado_desfaz_a_empresa_junto(client, superadmin_de_teste, usuario_de_teste, pool):
+async def test_email_duplicado_desfaz_a_empresa_junto(client, superadmin_de_teste, usuario_de_teste, db):
     """O e-mail do admin só colide no ÚLTIMO passo da transação -- é o caso
     em que o rollback importa."""
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
@@ -133,13 +133,13 @@ async def test_email_duplicado_desfaz_a_empresa_junto(client, superadmin_de_test
     })
     assert r.status_code == 409, r.text
 
-    async with superadmin_scoped_connection(pool) as conn:
-        restou = await conn.fetchval("SELECT count(*) FROM empresas WHERE nome = $1", f"Colisao {sufixo}")
+    async with db.superadmin_session() as conn:
+        restou = await valor(conn, "SELECT count(*) FROM empresas WHERE nome = $1", f"Colisao {sufixo}")
     assert restou == 0
 
 
 @pytest.mark.asyncio
-async def test_edita_contrato_e_lista_traz_os_campos(client, superadmin_de_teste, pool):
+async def test_edita_contrato_e_lista_traz_os_campos(client, superadmin_de_teste, db):
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
     sufixo = _sufixo()
     criado = await client.post("/api/v1/admin/clientes", headers=CSRF, json={

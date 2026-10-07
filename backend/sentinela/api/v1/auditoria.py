@@ -20,6 +20,6 @@ async def listar_auditoria(
     # tamanho da consulta dentro do próprio tenant).
     limite: int = Query(100, gt=0, le=500),
     usuario: dict = Depends(exigir_papel("admin")),
-    conn=Depends(conexao_tenant),
+    sessao=Depends(conexao_tenant),
 ):
-    return {"auditoria": await servico.listar_auditoria(conn, limite=limite)}
+    return {"auditoria": await servico.listar_auditoria(sessao, limite=limite)}

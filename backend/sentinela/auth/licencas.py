@@ -15,7 +15,7 @@ serem conceitos distintos mesmo tendo a mesma forma de token.
 Mesmo problema de "ovo e galinha" do login/agentes: RLS em `licencas` exige
 um tenant já setado, mas no momento em que só temos o token ainda não
 sabemos a empresa. Resolvido do mesmo jeito -- uma busca via
-`superadmin_scoped_connection` (BYPASSRLS), indexada pelo PREFIXO do token
+`Database.superadmin_session` (BYPASSRLS), indexada pelo PREFIXO do token
 (não pelo token inteiro, que só existe em hash).
 
 Formato do token: "lic_<prefixo 12 hex>_<segredo 43 chars url-safe>". Gerado
@@ -64,7 +64,7 @@ def extrair_prefixo(token: str) -> str | None:
     return prefixo
 
 
-async def autenticar_licenca(pool, token: str) -> dict | None:
+async def autenticar_licenca(db, token: str) -> dict | None:
     """
     Retorna {"licenca_id", "empresa_id", "plano_id", "status", "expira_em"}
     se o token bater com uma licença existente (de QUALQUER status -- quem
@@ -80,7 +80,7 @@ async def autenticar_licenca(pool, token: str) -> dict | None:
     # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
     licenca = None
     if prefixo is not None:
-        async with pool.superadmin_session() as sessao:
+        async with db.superadmin_session() as sessao:
             licenca = await LicencaRepositorio(sessao).buscar_por_prefixo(prefixo)
     token_valido = await asyncio.to_thread(
         verificar_senha, token, licenca["token_hash"] if licenca else _HASH_DUMMY

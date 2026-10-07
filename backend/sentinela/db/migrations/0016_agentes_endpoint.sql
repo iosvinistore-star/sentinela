@@ -56,7 +56,7 @@ CREATE POLICY tenant_isolation_agentes ON agentes
 
 CREATE INDEX IF NOT EXISTS idx_agentes_empresa ON agentes (empresa_id);
 -- Usado só pelo lookup de autenticação (auth/agentes.py), que roda via
--- superadmin_scoped_connection (BYPASSRLS) -- não há como saber o tenant
+-- Database.superadmin_session (BYPASSRLS) -- não há como saber o tenant
 -- ANTES de resolver o token, mesmo problema de "ovo e galinha" do login
 -- de usuário (ver auth/login.py). token_prefixo já é UNIQUE acima, o que
 -- cria o índice; esta linha existe só como documentação do motivo.

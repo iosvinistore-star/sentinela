@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar_um
 
 pytestmark = pytest.mark.integration
 
@@ -345,7 +345,7 @@ async def test_heartbeat_com_hostname_divergente_do_registrado_e_409(client, sup
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_com_processo_suspeito_abre_incidente_endpoint(client, superadmin_de_teste, usuario_de_teste, pool):
+async def test_heartbeat_com_processo_suspeito_abre_incidente_endpoint(client, superadmin_de_teste, usuario_de_teste, db):
     token = await _criar_agente_e_obter_token(client, superadmin_de_teste, usuario_de_teste, "host-hb-suspeito-api")
 
     resp = await client.post(
@@ -368,9 +368,8 @@ async def test_heartbeat_com_processo_suspeito_abre_incidente_endpoint(client, s
     # revisão humana -- ver tests/integration/test_automacao_service.py).
     assert corpo["incidente"]["severidade"] == "CRITICAL"
 
-    async with superadmin_scoped_connection(pool) as conn:
-        linha = await conn.fetchrow(
-            "SELECT origem FROM incidentes WHERE incident_id = $1", corpo["incidente"]["incident_id"],
+    async with db.superadmin_session() as conn:
+        linha = await buscar_um(conn, "SELECT origem FROM incidentes WHERE incident_id = $1", corpo["incidente"]["incident_id"],
         )
     assert linha["origem"] == "endpoint"
 

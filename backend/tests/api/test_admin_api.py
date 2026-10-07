@@ -8,8 +8,8 @@ import uuid
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar_um, executar
 
 pytestmark = pytest.mark.integration
 
@@ -22,7 +22,7 @@ async def test_usuario_comum_nao_acessa_rotas_de_admin(client, usuario_de_teste)
 
 
 @pytest.mark.asyncio
-async def test_sessao_de_superadmin_revogada_e_recusada_na_proxima_requisicao(client, pool, superadmin_de_teste):
+async def test_sessao_de_superadmin_revogada_e_recusada_na_proxima_requisicao(client, db, superadmin_de_teste):
     """
     Ponto 6 do review de hardening: sessão de superadmin agora tem o mesmo
     reforço em tempo real que já existia para usuário de empresa (ver
@@ -39,9 +39,8 @@ async def test_sessao_de_superadmin_revogada_e_recusada_na_proxima_requisicao(cl
     resp_antes = await client.get("/api/v1/admin/empresas")
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "UPDATE superadmins SET token_version = token_version + 1 WHERE id = $1",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE superadmins SET token_version = token_version + 1 WHERE id = $1",
             superadmin_de_teste["id"],
         )
 
@@ -74,7 +73,7 @@ async def test_empresa_id_malformado_e_422_nao_500(client, superadmin_de_teste):
 
 
 @pytest.mark.asyncio
-async def test_superadmin_cria_empresa_e_admin_inicial_que_consegue_logar(client, superadmin_de_teste, pool):
+async def test_superadmin_cria_empresa_e_admin_inicial_que_consegue_logar(client, superadmin_de_teste, db):
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
 
     resp_criar_empresa = await client.post(
@@ -104,14 +103,14 @@ async def test_superadmin_cria_empresa_e_admin_inicial_que_consegue_logar(client
     assert resp_login_novo_admin.status_code == 200
     assert resp_login_novo_admin.json()["usuario"]["papel"] == "admin"
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM empresas WHERE id = $1", empresa_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM empresas WHERE id = $1", empresa_id)
 
 
 @pytest.mark.asyncio
-async def test_nova_empresa_comeca_no_modo_firewall_padrao(client, superadmin_de_teste, pool):
+async def test_nova_empresa_comeca_no_modo_firewall_padrao(client, superadmin_de_teste, db):
     """Ver migrations/0012_firewall_modo_e_incidente.sql -- item 8 do plano
     de endurecimento."""
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
@@ -126,9 +125,9 @@ async def test_nova_empresa_comeca_no_modo_firewall_padrao(client, superadmin_de
     # sem isto, a linha de auditoria (empresa.criada, ator_superadmin_id)
     # sobrevive ao teste e quebra o teardown do fixture superadmin_de_teste
     # (FK fk_auditoria_superadmin).
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM empresas WHERE id = $1", empresa_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM empresas WHERE id = $1", empresa_id)
 
 
 @pytest.mark.asyncio
@@ -178,7 +177,7 @@ async def test_web_superadmin_altera_modo_firewall_da_empresa(client, superadmin
 
 
 @pytest.mark.asyncio
-async def test_superadmin_liga_flags_do_modo_autonomo(client, superadmin_de_teste, usuario_de_teste, pool):
+async def test_superadmin_liga_flags_do_modo_autonomo(client, superadmin_de_teste, usuario_de_teste, db):
     """Migrations/0014_autonomia_operacional.sql -- as duas chaves opt-in
     do modo autônomo são admin-only, no mesmo lugar que modo_firewall (ver
     services/empresas.py)."""
@@ -194,9 +193,8 @@ async def test_superadmin_liga_flags_do_modo_autonomo(client, superadmin_de_test
     assert resp.json()["empresa"]["modo_firewall_auto"] is True
     assert resp.json()["empresa"]["auto_triagem_incidentes"] is True
 
-    async with superadmin_scoped_connection(pool) as conn:
-        linha = await conn.fetchrow(
-            "SELECT modo_firewall_auto, auto_triagem_incidentes FROM empresas WHERE id = $1", empresa_id,
+    async with db.superadmin_session() as conn:
+        linha = await buscar_um(conn, "SELECT modo_firewall_auto, auto_triagem_incidentes FROM empresas WHERE id = $1", empresa_id,
         )
     assert linha["modo_firewall_auto"] is True
     assert linha["auto_triagem_incidentes"] is True
@@ -320,7 +318,7 @@ async def test_web_superadmin_troca_a_propria_senha(client, superadmin_de_teste)
 
 
 @pytest.mark.asyncio
-async def test_token_version_revogado_derruba_get_admin_minha_conta_ja_aberta(client, pool, superadmin_de_teste):
+async def test_token_version_revogado_derruba_get_admin_minha_conta_ja_aberta(client, db, superadmin_de_teste):
     """
     Correção de bug encontrado em revisão crítica (2026-09, achado 6):
     GET /admin/minha-conta (só leitura) dependia SÓ de
@@ -341,9 +339,8 @@ async def test_token_version_revogado_derruba_get_admin_minha_conta_ja_aberta(cl
     resp_antes = await client.get("/admin/minha-conta", follow_redirects=False)
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "UPDATE superadmins SET token_version = token_version + 1 WHERE id = $1",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE superadmins SET token_version = token_version + 1 WHERE id = $1",
             superadmin_de_teste["id"],
         )
 
@@ -358,7 +355,7 @@ async def test_token_version_revogado_derruba_get_admin_minha_conta_ja_aberta(cl
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_saas_owner_pode_criar_saas_admin(client, superadmin_de_teste, pool):
+async def test_saas_owner_pode_criar_saas_admin(client, superadmin_de_teste, db):
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
     email_novo = f"saas-admin-{uuid.uuid4()}@example.com"
     resp = await client.post(
@@ -369,20 +366,19 @@ async def test_saas_owner_pode_criar_saas_admin(client, superadmin_de_teste, poo
     assert resp.status_code == 200
     assert resp.json()["conta"]["papel"] == "saas_admin"
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM auditoria WHERE ator_superadmin_id = $1", superadmin_de_teste["id"])
-        await conn.execute("DELETE FROM superadmins WHERE email = $1", email_novo)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM auditoria WHERE ator_superadmin_id = $1", superadmin_de_teste["id"])
+        await executar(conn, "DELETE FROM superadmins WHERE email = $1", email_novo)
 
 
 @pytest.mark.asyncio
-async def test_saas_admin_nao_pode_criar_outro_saas_admin(client, pool):
+async def test_saas_admin_nao_pode_criar_outro_saas_admin(client, db):
     from sentinela.auth.security import hash_senha
 
     saas_admin_id = uuid.uuid4()
     email = f"saas-admin-ator-{uuid.uuid4()}@example.com"
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "INSERT INTO superadmins (id, email, senha_hash, papel) VALUES ($1, $2, $3, 'saas_admin')",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "INSERT INTO superadmins (id, email, senha_hash, papel) VALUES ($1, $2, $3, 'saas_admin')",
             saas_admin_id, email, hash_senha("senha-forte-123"),
         )
     try:
@@ -394,6 +390,6 @@ async def test_saas_admin_nao_pode_criar_outro_saas_admin(client, pool):
         )
         assert resp.status_code == 403
     finally:
-        async with superadmin_scoped_connection(pool) as conn:
-            await conn.execute("DELETE FROM auditoria WHERE ator_superadmin_id = $1", saas_admin_id)
-            await conn.execute("DELETE FROM superadmins WHERE id = $1", saas_admin_id)
+        async with db.superadmin_session() as conn:
+            await executar(conn, "DELETE FROM auditoria WHERE ator_superadmin_id = $1", saas_admin_id)
+            await executar(conn, "DELETE FROM superadmins WHERE id = $1", saas_admin_id)

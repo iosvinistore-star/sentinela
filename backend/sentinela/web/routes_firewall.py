@@ -15,8 +15,8 @@ router = APIRouter()
 
 
 @router.get("/firewall")
-async def listar(request: Request, usuario: dict = Depends(exigir_login_web), conn=Depends(conexao_tenant_web)):
-    bloqueios = await servico.listar_bloqueios(conn, usuario["empresa_id"])
+async def listar(request: Request, usuario: dict = Depends(exigir_login_web), sessao=Depends(conexao_tenant_web)):
+    bloqueios = await servico.listar_bloqueios(sessao, usuario["empresa_id"])
     return templates.TemplateResponse(request, "firewall/lista.html", {"usuario": usuario, "bloqueios": bloqueios})
 
 
@@ -30,20 +30,20 @@ async def bloquear(request: Request, ip: str = Form(...),
                      # lacuna do endpoint JSON em api/v1/firewall.py, aqui fechada com
                      # ge=0 em vez de gt=0 por causa da convenção "0 = permanente" do form.
                      duracao_horas: float = Form(24, ge=0, le=8760),
-                     usuario: dict = Depends(exigir_papel_web("admin")), conn=Depends(conexao_tenant_web)):
+                     usuario: dict = Depends(exigir_papel_web("admin")), sessao=Depends(conexao_tenant_web)):
     await servico.registrar_bloqueio(
-        conn, usuario["empresa_id"], ip, motivo,
+        sessao, usuario["empresa_id"], ip, motivo,
         dry_run=False, duracao_horas=duracao_horas or None, origem="web", usuario_id=usuario["sub"],
     )
-    bloqueios = await servico.listar_bloqueios(conn, usuario["empresa_id"])
+    bloqueios = await servico.listar_bloqueios(sessao, usuario["empresa_id"])
     return templates.TemplateResponse(request, "firewall/_tabela.html", {"usuario": usuario, "bloqueios": bloqueios})
 
 
 @router.delete("/firewall/bloqueios/{ip}", dependencies=[Depends(exigir_csrf_header)])
 async def remover(ip: str, request: Request,
-                    usuario: dict = Depends(exigir_papel_web("admin")), conn=Depends(conexao_tenant_web)):
+                    usuario: dict = Depends(exigir_papel_web("admin")), sessao=Depends(conexao_tenant_web)):
     await servico.remover_bloqueio(
-        conn, request.app.state.pool, usuario["empresa_id"], ip, origem="web", usuario_id=usuario["sub"],
+        sessao, request.app.state.db, usuario["empresa_id"], ip, origem="web", usuario_id=usuario["sub"],
     )
-    bloqueios = await servico.listar_bloqueios(conn, usuario["empresa_id"])
+    bloqueios = await servico.listar_bloqueios(sessao, usuario["empresa_id"])
     return templates.TemplateResponse(request, "firewall/_tabela.html", {"usuario": usuario, "bloqueios": bloqueios})

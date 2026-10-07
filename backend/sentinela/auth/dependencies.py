@@ -90,7 +90,7 @@ def _settings(request: Request):
 
 
 def _pool(request: Request):
-    return request.app.state.pool
+    return request.app.state.db
 
 
 async def usuario_atual(request: Request) -> dict | None:
@@ -191,7 +191,7 @@ async def conexao_tenant(usuario: dict = Depends(exigir_login), request: Request
     nenhuma sessão já aberta em outro dispositivo com o cookie antigo.
 
     E, criticamente, `AND empresa_id = $2` abaixo -- o `empresa_id` que
-    escopa a conexão RLS desta requisição (via `tenant_scoped_connection`)
+    escopa a conexão RLS desta requisição (via `Database.tenant_session`)
     vem direto da claim `empresa_id` do JWT, sem nunca ter sido conferido
     contra o `empresa_id` DE VERDADE do usuário (`usuarios.sub`) no banco.
     Um JWT com assinatura válida mas claim `empresa_id` adulterada (ex.:
@@ -441,7 +441,7 @@ def _timestamp_replay_valido(valor: str, agora: float) -> bool:
     return abs(agora - timestamp) <= JANELA_REPLAY_SEGUNDOS
 
 
-async def _registrar_nonce_ou_recusar(pool, licenca_id, nonce: str) -> bool:
+async def _registrar_nonce_ou_recusar(db, licenca_id, nonce: str) -> bool:
     """
     Fase D / D6 -- registra `nonce` como usado para `licenca_id` (nunca
     global -- ver ARQUITETURA_LICENCIAMENTO.md §11) e devolve True na
@@ -457,7 +457,7 @@ async def _registrar_nonce_ou_recusar(pool, licenca_id, nonce: str) -> bool:
     `_timestamp_replay_valido`), então não precisa de um job agendado à
     parte para a tabela não crescer sem limite.
     """
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         repo = LicencaRepositorio(sessao)
         await repo.limpar_nonces_antigos(JANELA_REPLAY_SEGUNDOS)
         return await repo.registrar_nonce(licenca_id, nonce)

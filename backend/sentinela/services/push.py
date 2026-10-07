@@ -146,7 +146,7 @@ async def _registrar_resultado(sessao, inscricao_id, entregue: bool, status: int
         await repo.registrar_falha(inscricao_id, MAX_FALHAS)
 
 
-async def notificar_empresa(pool, settings, empresa_id, carga: dict) -> int:
+async def notificar_empresa(db, settings, empresa_id, carga: dict) -> int:
     """Manda `carga` para todos os aparelhos inscritos da empresa.
 
     Usa conexão de superadmin própria (não a do chamador): o envio é
@@ -156,7 +156,7 @@ async def notificar_empresa(pool, settings, empresa_id, carga: dict) -> int:
     """
     if not configurado(settings):
         return 0
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         inscricoes = await PushRepositorio(sessao).listar_para_envio(empresa_id)
     if not inscricoes:
         return 0
@@ -166,7 +166,7 @@ async def notificar_empresa(pool, settings, empresa_id, carga: dict) -> int:
     resultados = [
         (r["id"], *await asyncio.to_thread(_enviar_uma, settings, r, carga)) for r in inscricoes
     ]
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         for inscricao_id, entregue, status in resultados:
             await _registrar_resultado(sessao, inscricao_id, entregue, status)
     entregues = sum(int(entregue) for _, entregue, _ in resultados)
@@ -198,8 +198,8 @@ def agendar_alerta_incidente(empresa_id, incidente: dict) -> None:
     if severidade not in SEVERIDADES_QUE_NOTIFICAM:
         return
     settings = getattr(getattr(_app, "state", None), "settings", None)
-    pool = getattr(getattr(_app, "state", None), "pool", None)
-    if settings is None or pool is None or not configurado(settings):
+    db = getattr(getattr(_app, "state", None), "db", None)
+    if settings is None or db is None or not configurado(settings):
         return
 
     ataques = incidente.get("ataques") or []
@@ -219,7 +219,7 @@ def agendar_alerta_incidente(empresa_id, incidente: dict) -> None:
 
     async def _tarefa():
         try:
-            await notificar_empresa(pool, settings, empresa_id, carga)
+            await notificar_empresa(db, settings, empresa_id, carga)
         except Exception:  # noqa: BLE001
             log.warning("push: falha ao notificar incidente", exc_info=True)
 

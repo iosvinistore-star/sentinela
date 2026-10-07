@@ -60,18 +60,18 @@ class DesativarMfaRequest(BaseModel):
 
 
 @router.get("")
-async def listar_usuarios(usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    return {"usuarios": await servico.listar_usuarios(conn)}
+async def listar_usuarios(usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    return {"usuarios": await servico.listar_usuarios(sessao)}
 
 
 @router.post("", dependencies=[Depends(exigir_csrf_header)])
 async def criar_usuario(dados: CriarUsuarioRequest, usuario: dict = Depends(exigir_papel("admin")),
-                          conn=Depends(conexao_tenant)):
+                          sessao=Depends(conexao_tenant)):
     if dados.papel not in _PAPEIS_VALIDOS:
         raise HTTPException(status_code=422, detail=f"papel inválido -- use um de {sorted(_PAPEIS_VALIDOS)}")
     try:
         criado = await servico.criar_usuario(
-            conn, usuario["empresa_id"], dados.email, dados.papel, dados.senha, ator_usuario_id=usuario["sub"],
+            sessao, usuario["empresa_id"], dados.email, dados.papel, dados.senha, ator_usuario_id=usuario["sub"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -82,7 +82,7 @@ async def criar_usuario(dados: CriarUsuarioRequest, usuario: dict = Depends(exig
 
 @router.patch("/me/senha", dependencies=[Depends(exigir_csrf_header)])
 async def trocar_propria_senha(dados: TrocarSenhaRequest, request: Request, response: Response,
-                                 usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
+                                 usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
     limitador = request.app.state.limitador_login
     # Chave por USUÁRIO (não por IP): quem já tem uma sessão válida deste
     # usuário pode estar em qualquer IP (cookie sequestrado) -- o que se
@@ -95,7 +95,7 @@ async def trocar_propria_senha(dados: TrocarSenhaRequest, request: Request, resp
             status_code=429, detail=f"muitas tentativas -- tente de novo em {int(restante) + 1} segundos",
             headers={"Retry-After": str(int(restante) + 1)},
         )
-    novo_tv = await servico.trocar_propria_senha(conn, usuario["sub"], dados.senha_atual, dados.senha_nova)
+    novo_tv = await servico.trocar_propria_senha(sessao, usuario["sub"], dados.senha_atual, dados.senha_nova)
     if novo_tv is None:
         raise HTTPException(status_code=401, detail="senha atual incorreta")
     await limitador.registrar_sucesso(chave)
@@ -127,7 +127,7 @@ async def atualizar_usuario(
     # aqui faz o FastAPI validar o formato antes mesmo de a rota rodar.
     usuario_id: uuid.UUID,
     dados: AtualizarUsuarioRequest,
-    usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant),
+    usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant),
 ):
     if dados.papel is not None and dados.papel not in _PAPEIS_VALIDOS:
         raise HTTPException(status_code=422, detail=f"papel inválido -- use um de {sorted(_PAPEIS_VALIDOS)}")
@@ -137,7 +137,7 @@ async def atualizar_usuario(
     if dados.papel is not None:
         validar_troca_de_papel_nao_e_autopromocao(usuario, str(usuario_id))
     atualizado = await servico.atualizar_usuario(
-        conn, usuario["empresa_id"], str(usuario_id), papel=dados.papel, ativo=dados.ativo,
+        sessao, usuario["empresa_id"], str(usuario_id), papel=dados.papel, ativo=dados.ativo,
         ator_usuario_id=usuario["sub"],
     )
     if atualizado is None:
@@ -169,12 +169,12 @@ async def _aplicar_limite_mfa(request: Request, usuario_id):
 
 
 @router.get("/me/mfa/status")
-async def status_mfa(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return await servico_mfa.obter_status_mfa(conn, usuario["sub"])
+async def status_mfa(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return await servico_mfa.obter_status_mfa(sessao, usuario["sub"])
 
 
 @router.post("/me/mfa/setup", dependencies=[Depends(exigir_csrf_header)])
-async def iniciar_mfa(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant), request: Request = None):
+async def iniciar_mfa(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant), request: Request = None):
     """
     Gera um segredo TOTP novo (ainda NÃO ativa MFA -- ver
     services/mfa.py:iniciar_configuracao) e devolve a URI de provisionamento
@@ -185,7 +185,7 @@ async def iniciar_mfa(usuario: dict = Depends(exigir_login), conn=Depends(conexa
     """
     settings = request.app.state.settings
     try:
-        resultado = await servico_mfa.iniciar_configuracao(conn, settings.mfa_encryption_key, usuario["sub"], usuario["email"])
+        resultado = await servico_mfa.iniciar_configuracao(sessao, settings.mfa_encryption_key, usuario["sub"], usuario["email"])
     except servico_mfa.MfaJaHabilitadoError:
         raise HTTPException(status_code=409, detail="MFA já está ativado -- desative antes de reconfigurar")
     return resultado
@@ -193,14 +193,14 @@ async def iniciar_mfa(usuario: dict = Depends(exigir_login), conn=Depends(conexa
 
 @router.post("/me/mfa/confirmar", dependencies=[Depends(exigir_csrf_header)])
 async def confirmar_mfa(dados: ConfirmarMfaRequest, usuario: dict = Depends(exigir_login),
-                          conn=Depends(conexao_tenant), request: Request = None):
+                          sessao=Depends(conexao_tenant), request: Request = None):
     """Devolve os recovery codes em CLARO -- única vez que isto acontece (C7).
     O front-end deve exibi-los uma vez e orientar o usuário a salvá-los com segurança."""
     limitador, chave = await _aplicar_limite_mfa(request, usuario["sub"])
     settings = request.app.state.settings
     try:
         codigos = await servico_mfa.confirmar_configuracao(
-            conn, settings.mfa_encryption_key, usuario["empresa_id"], usuario["sub"], dados.codigo,
+            sessao, settings.mfa_encryption_key, usuario["empresa_id"], usuario["sub"], dados.codigo,
         )
     except servico_mfa.MfaNaoConfiguradoError:
         raise HTTPException(status_code=400, detail="nenhuma configuração de MFA pendente -- inicie o setup primeiro")
@@ -214,33 +214,33 @@ async def confirmar_mfa(dados: ConfirmarMfaRequest, usuario: dict = Depends(exig
 
 @router.post("/me/mfa/desativar", dependencies=[Depends(exigir_csrf_header)])
 async def desativar_mfa(dados: DesativarMfaRequest, usuario: dict = Depends(exigir_login),
-                          conn=Depends(conexao_tenant), request: Request = None):
+                          sessao=Depends(conexao_tenant), request: Request = None):
     limitador, chave = await _aplicar_limite_mfa(request, usuario["sub"])
     ok = await servico_mfa.verificar_no_login(
-        conn, request.app.state.settings.mfa_encryption_key, usuario["empresa_id"], usuario["sub"],
+        sessao, request.app.state.settings.mfa_encryption_key, usuario["empresa_id"], usuario["sub"],
         codigo=dados.codigo, recovery_code=dados.recovery_code,
     )
     if not ok:
         raise HTTPException(status_code=401, detail="código ou recovery code inválido")
     await limitador.registrar_sucesso(chave)
-    await servico_mfa.desativar(conn, usuario["empresa_id"], usuario["sub"], ator_usuario_id=usuario["sub"])
+    await servico_mfa.desativar(sessao, usuario["empresa_id"], usuario["sub"], ator_usuario_id=usuario["sub"])
     return {"ok": True}
 
 
 @router.post("/me/mfa/recovery-codes/regenerar", dependencies=[Depends(exigir_csrf_header)])
 async def regenerar_recovery_codes(dados: ConfirmarMfaRequest, usuario: dict = Depends(exigir_login),
-                                     conn=Depends(conexao_tenant), request: Request = None):
+                                     sessao=Depends(conexao_tenant), request: Request = None):
     """Exige um código TOTP válido (prova de posse do autenticador) antes de
     invalidar o conjunto anterior de recovery codes -- ver C7."""
     limitador, chave = await _aplicar_limite_mfa(request, usuario["sub"])
     ok = await servico_mfa.verificar_no_login(
-        conn, request.app.state.settings.mfa_encryption_key, usuario["empresa_id"], usuario["sub"],
+        sessao, request.app.state.settings.mfa_encryption_key, usuario["empresa_id"], usuario["sub"],
         codigo=dados.codigo,
     )
     if not ok:
         raise HTTPException(status_code=401, detail="código inválido")
     await limitador.registrar_sucesso(chave)
-    codigos = await servico_mfa.regenerar_recovery_codes(conn, usuario["empresa_id"], usuario["sub"])
+    codigos = await servico_mfa.regenerar_recovery_codes(sessao, usuario["empresa_id"], usuario["sub"])
     return {"recovery_codes": codigos}
 
 
@@ -252,7 +252,7 @@ async def resetar_mfa(
     # um simples POST sem proteção extra. A RLS de `conexao_tenant` garante
     # que `usuario_id` pertence à MESMA empresa de quem chama.
     ator: dict = Depends(exigir_permissao(PERM_MFA_RESET_OTHERS)),
-    conn=Depends(conexao_tenant),
+    sessao=Depends(conexao_tenant),
 ):
     # Nunca permite resetar o PRÓPRIO MFA por este caminho -- isso seria um
     # bypass do fator de posse exigido por `desativar_mfa` acima (uma
@@ -261,7 +261,7 @@ async def resetar_mfa(
     if str(ator["sub"]) == str(usuario_id):
         raise HTTPException(status_code=403, detail="use o fluxo de desativação self-service para o próprio MFA")
     try:
-        await servico_mfa.resetar_mfa_admin(conn, ator["empresa_id"], str(usuario_id), ator["sub"])
+        await servico_mfa.resetar_mfa_admin(sessao, ator["empresa_id"], str(usuario_id), ator["sub"])
     except servico_mfa.MfaNaoConfiguradoError:
         raise HTTPException(status_code=404, detail="usuário não encontrado nesta empresa")
     return {"ok": True}

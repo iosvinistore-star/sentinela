@@ -18,10 +18,10 @@ import uuid
 import pytest
 
 from sentinela.auth.agentes import autenticar_agente
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
 from sentinela.services import agentes as servico
 from sentinela.services import incidentes as servico_incidentes
 from sentinela.services import licenciamento as servico_licenciamento
+from tests.sql_cru import buscar, buscar_um, valor
 
 pytestmark = pytest.mark.integration
 
@@ -105,9 +105,9 @@ def test_avaliar_risco_sem_indicador_critico_nao_e_afetado():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_criar_agente_devolve_token_em_claro_uma_unica_vez(pool, empresa_factory):
+async def test_criar_agente_devolve_token_em_claro_uma_unica_vez(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Criar")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, token = await servico.criar_agente(conn, empresa_id, "servidor-web-01")
 
     assert agente["hostname"] == "servidor-web-01"
@@ -118,9 +118,9 @@ async def test_criar_agente_devolve_token_em_claro_uma_unica_vez(pool, empresa_f
 
 
 @pytest.mark.asyncio
-async def test_criar_agente_com_hostname_duplicado_na_mesma_empresa_retorna_none(pool, empresa_factory):
+async def test_criar_agente_com_hostname_duplicado_na_mesma_empresa_retorna_none(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Duplicado")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         await servico.criar_agente(conn, empresa_id, "servidor-duplicado")
         agente_2, token_2 = await servico.criar_agente(conn, empresa_id, "servidor-duplicado")
 
@@ -129,7 +129,7 @@ async def test_criar_agente_com_hostname_duplicado_na_mesma_empresa_retorna_none
 
 
 @pytest.mark.asyncio
-async def test_criar_agente_apos_revogar_o_anterior_com_mesmo_hostname_funciona(pool, empresa_factory):
+async def test_criar_agente_apos_revogar_o_anterior_com_mesmo_hostname_funciona(db, empresa_factory):
     """
     Correção de bug de revisão crítica (2026-09): a UNIQUE constraint
     original (0016_agentes_endpoint.sql) era de tabela inteira, sem
@@ -141,7 +141,7 @@ async def test_criar_agente_apos_revogar_o_anterior_com_mesmo_hostname_funciona(
     MESMO hostname na MESMA empresa precisa funcionar.
     """
     empresa_id = await empresa_factory("Empresa Agentes Reemitir Apos Revogar")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente_1, token_1 = await servico.criar_agente(conn, empresa_id, "servidor-reemitir")
         assert agente_1 is not None
 
@@ -164,12 +164,12 @@ async def test_criar_agente_apos_revogar_o_anterior_com_mesmo_hostname_funciona(
 
 
 @pytest.mark.asyncio
-async def test_criar_agente_com_dois_ativos_mesmo_hostname_ainda_falha(pool, empresa_factory):
+async def test_criar_agente_com_dois_ativos_mesmo_hostname_ainda_falha(db, empresa_factory):
     """Confirma que o índice parcial continua protegendo o caso original --
     dois agentes ATIVOS simultâneos para o mesmo hostname na mesma empresa
     continua sendo um 409, exatamente como antes da correção."""
     empresa_id = await empresa_factory("Empresa Agentes Dois Ativos Mesmo Hostname")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente_1, _ = await servico.criar_agente(conn, empresa_id, "servidor-dois-ativos")
         assert agente_1 is not None
 
@@ -179,13 +179,13 @@ async def test_criar_agente_com_dois_ativos_mesmo_hostname_ainda_falha(pool, emp
 
 
 @pytest.mark.asyncio
-async def test_mesmo_hostname_em_empresas_diferentes_nao_colide(pool, empresa_factory):
+async def test_mesmo_hostname_em_empresas_diferentes_nao_colide(db, empresa_factory):
     empresa_a = await empresa_factory("Empresa Agentes Hostname A")
     empresa_b = await empresa_factory("Empresa Agentes Hostname B")
 
-    async with tenant_scoped_connection(pool, empresa_a) as conn_a:
+    async with db.tenant_session(empresa_a) as conn_a:
         agente_a, _ = await servico.criar_agente(conn_a, empresa_a, "servidor-mesmo-nome")
-    async with tenant_scoped_connection(pool, empresa_b) as conn_b:
+    async with db.tenant_session(empresa_b) as conn_b:
         agente_b, _ = await servico.criar_agente(conn_b, empresa_b, "servidor-mesmo-nome")
 
     assert agente_a is not None
@@ -194,14 +194,14 @@ async def test_mesmo_hostname_em_empresas_diferentes_nao_colide(pool, empresa_fa
 
 
 @pytest.mark.asyncio
-async def test_listar_agentes_de_uma_empresa_nao_mostra_agente_de_outra(pool, empresa_factory):
+async def test_listar_agentes_de_uma_empresa_nao_mostra_agente_de_outra(db, empresa_factory):
     empresa_a = await empresa_factory("Empresa Agentes Listar A")
     empresa_b = await empresa_factory("Empresa Agentes Listar B")
 
-    async with tenant_scoped_connection(pool, empresa_a) as conn_a:
+    async with db.tenant_session(empresa_a) as conn_a:
         await servico.criar_agente(conn_a, empresa_a, "host-a-1")
 
-    async with tenant_scoped_connection(pool, empresa_b) as conn_b:
+    async with db.tenant_session(empresa_b) as conn_b:
         await servico.criar_agente(conn_b, empresa_b, "host-b-1")
         listados_b = await servico.listar_agentes(conn_b)
 
@@ -209,9 +209,9 @@ async def test_listar_agentes_de_uma_empresa_nao_mostra_agente_de_outra(pool, em
 
 
 @pytest.mark.asyncio
-async def test_revogar_agente_e_idempotente_e_preserva_a_linha(pool, empresa_factory):
+async def test_revogar_agente_e_idempotente_e_preserva_a_linha(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Revogar")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "servidor-a-revogar")
 
         revogado_1 = await servico.revogar_agente(conn, empresa_id, agente["id"])
@@ -226,29 +226,29 @@ async def test_revogar_agente_e_idempotente_e_preserva_a_linha(pool, empresa_fac
 
 
 @pytest.mark.asyncio
-async def test_revogar_agente_inexistente_retorna_none(pool, empresa_factory):
+async def test_revogar_agente_inexistente_retorna_none(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Revogar Inexistente")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         assert await servico.revogar_agente(conn, empresa_id, str(uuid.uuid4())) is None
 
 
 @pytest.mark.asyncio
-async def test_revogar_agente_de_outra_empresa_nao_afeta_nada(pool, empresa_factory):
+async def test_revogar_agente_de_outra_empresa_nao_afeta_nada(db, empresa_factory):
     """RLS por si só já impediria a UPDATE de enxergar a linha (`WHERE ...
     AND empresa_id = $2` é redundante com a policy), mas o teste confirma
     o comportamento de ponta a ponta pela camada de serviço."""
     empresa_a = await empresa_factory("Empresa Agentes Revogar Cross A")
     empresa_b = await empresa_factory("Empresa Agentes Revogar Cross B")
 
-    async with tenant_scoped_connection(pool, empresa_a) as conn_a:
+    async with db.tenant_session(empresa_a) as conn_a:
         agente_a, _ = await servico.criar_agente(conn_a, empresa_a, "host-cross-a")
 
-    async with tenant_scoped_connection(pool, empresa_b) as conn_b:
+    async with db.tenant_session(empresa_b) as conn_b:
         resultado = await servico.revogar_agente(conn_b, empresa_b, agente_a["id"])
     assert resultado is None
 
-    async with tenant_scoped_connection(pool, empresa_a) as conn_a:
-        linha = await conn_a.fetchrow("SELECT status FROM agentes WHERE id = $1", agente_a["id"])
+    async with db.tenant_session(empresa_a) as conn_a:
+        linha = await buscar_um(conn_a, "SELECT status FROM agentes WHERE id = $1", agente_a["id"])
     assert linha["status"] == "ativo"
 
 
@@ -258,19 +258,18 @@ async def test_revogar_agente_de_outra_empresa_nao_afeta_nada(pool, empresa_fact
 # revogar_agente para o porquê e para os limites explícitos desta correção).
 # ---------------------------------------------------------------------------
 
-async def _plano_id_teste(pool, max_endpoints=5):
+async def _plano_id_teste(db, max_endpoints=5):
     """Plano isolado por teste (nome único) -- evita depender do valor exato
     seedado para 'starter', que pode mudar (mesmo padrão já usado em
     test_licenciamento_service.py:test_registrar_endpoint_recusa_acima_do_limite_do_plano)."""
-    async with superadmin_scoped_connection(pool) as conn_admin:
-        return await conn_admin.fetchval(
-            "INSERT INTO planos (codigo, nome_exibicao, max_endpoints) VALUES ($1, $2, $3) RETURNING id",
+    async with db.superadmin_session() as conn_admin:
+        return await valor(conn_admin, "INSERT INTO planos (codigo, nome_exibicao, max_endpoints) VALUES ($1, $2, $3) RETURNING id",
             f"teste-revogar-agente-{uuid.uuid4().hex[:8]}", "Plano De Teste Revogar Agente", max_endpoints,
         )
 
 
 @pytest.mark.asyncio
-async def test_revogar_agente_libera_a_vaga_de_endpoint_que_ele_ocupava(pool, empresa_factory):
+async def test_revogar_agente_libera_a_vaga_de_endpoint_que_ele_ocupava(db, empresa_factory):
     """Antes desta correção, `liberar_endpoint` existia mas nunca era
     chamada por `revogar_agente` -- um agente revogado continuava contando
     para sempre contra `planos.max_endpoints` (vazamento de vaga). Cria um
@@ -279,22 +278,20 @@ async def test_revogar_agente_libera_a_vaga_de_endpoint_que_ele_ocupava(pool, em
     UPDATE isolado (que já é coberto por
     test_licenciamento_service.py:test_liberar_endpoint_abre_vaga_para_um_agente_novo)."""
     empresa_id = await empresa_factory("Empresa Revogar Agente Libera Vaga")
-    plano_id = await _plano_id_teste(pool, max_endpoints=1)
+    plano_id = await _plano_id_teste(db, max_endpoints=1)
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         licenca, _ = await servico_licenciamento.criar_licenca(conn, empresa_id, plano_id)
         agente_1, _ = await servico.criar_agente(conn, empresa_id, "host-revogar-libera-1")
         await servico_licenciamento.registrar_endpoint(conn, empresa_id, licenca["id"], agente_1["id"])
 
-        ocupadas_antes = await conn.fetchval(
-            "SELECT count(*) FROM licencas_endpoints WHERE licenca_id = $1 AND liberado_em IS NULL", licenca["id"],
+        ocupadas_antes = await valor(conn, "SELECT count(*) FROM licencas_endpoints WHERE licenca_id = $1 AND liberado_em IS NULL", licenca["id"],
         )
         assert ocupadas_antes == 1
 
         await servico.revogar_agente(conn, empresa_id, agente_1["id"])
 
-        vaga = await conn.fetchrow(
-            "SELECT liberado_em FROM licencas_endpoints WHERE agente_id = $1", agente_1["id"],
+        vaga = await buscar_um(conn, "SELECT liberado_em FROM licencas_endpoints WHERE agente_id = $1", agente_1["id"],
         )
         assert vaga["liberado_em"] is not None
 
@@ -307,19 +304,18 @@ async def test_revogar_agente_libera_a_vaga_de_endpoint_que_ele_ocupava(pool, em
 
 
 @pytest.mark.asyncio
-async def test_revogar_agente_grava_na_auditoria_se_havia_vaga_para_liberar(pool, empresa_factory):
+async def test_revogar_agente_grava_na_auditoria_se_havia_vaga_para_liberar(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Revogar Agente Auditoria Vaga")
-    plano_id = await _plano_id_teste(pool)
+    plano_id = await _plano_id_teste(db)
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         licenca, _ = await servico_licenciamento.criar_licenca(conn, empresa_id, plano_id)
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-revogar-auditoria-com-vaga")
         await servico_licenciamento.registrar_endpoint(conn, empresa_id, licenca["id"], agente["id"])
 
         await servico.revogar_agente(conn, empresa_id, agente["id"])
 
-        auditoria = await conn.fetchrow(
-            "SELECT detalhes FROM auditoria WHERE empresa_id = $1 AND acao = 'agente.revogado' ORDER BY criado_em DESC LIMIT 1",
+        auditoria = await buscar_um(conn, "SELECT detalhes FROM auditoria WHERE empresa_id = $1 AND acao = 'agente.revogado' ORDER BY criado_em DESC LIMIT 1",
             empresa_id,
         )
     detalhes = auditoria["detalhes"] if isinstance(auditoria["detalhes"], dict) else json.loads(auditoria["detalhes"])
@@ -327,21 +323,20 @@ async def test_revogar_agente_grava_na_auditoria_se_havia_vaga_para_liberar(pool
 
 
 @pytest.mark.asyncio
-async def test_revogar_agente_sem_vaga_nenhuma_nao_falha_e_audita_honestamente(pool, empresa_factory):
+async def test_revogar_agente_sem_vaga_nenhuma_nao_falha_e_audita_honestamente(db, empresa_factory):
     """Um agente que nunca ocupou vaga nenhuma (nenhum registrar_endpoint
     chamado para ele) precisa continuar revogável normalmente --
     `liberar_endpoint` devolve None nesse caso, e o payload de auditoria
     reflete isso (`vaga_endpoint_liberada: False`) em vez de fingir que uma
     vaga foi liberada."""
     empresa_id = await empresa_factory("Empresa Revogar Agente Sem Vaga")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-revogar-sem-vaga")
 
         revogado = await servico.revogar_agente(conn, empresa_id, agente["id"])
         assert revogado["status"] == "revogado"
 
-        auditoria = await conn.fetchrow(
-            "SELECT detalhes FROM auditoria WHERE empresa_id = $1 AND acao = 'agente.revogado' ORDER BY criado_em DESC LIMIT 1",
+        auditoria = await buscar_um(conn, "SELECT detalhes FROM auditoria WHERE empresa_id = $1 AND acao = 'agente.revogado' ORDER BY criado_em DESC LIMIT 1",
             empresa_id,
         )
     detalhes = auditoria["detalhes"] if isinstance(auditoria["detalhes"], dict) else json.loads(auditoria["detalhes"])
@@ -356,15 +351,14 @@ async def test_revogar_agente_sem_vaga_nenhuma_nao_falha_e_audita_honestamente(p
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_criar_agente_vincula_automaticamente_a_licenca_ativa_da_empresa(pool, empresa_factory):
+async def test_criar_agente_vincula_automaticamente_a_licenca_ativa_da_empresa(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes D1 Autobind")
-    plano_id = await _plano_id_teste(pool, max_endpoints=5)
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    plano_id = await _plano_id_teste(db, max_endpoints=5)
+    async with db.tenant_session(empresa_id) as conn:
         licenca, _ = await servico_licenciamento.criar_licenca(conn, empresa_id, plano_id)
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-d1-autobind")
 
-        vaga = await conn.fetchrow(
-            "SELECT licenca_id, liberado_em FROM licencas_endpoints WHERE agente_id = $1", agente["id"],
+        vaga = await buscar_um(conn, "SELECT licenca_id, liberado_em FROM licencas_endpoints WHERE agente_id = $1", agente["id"],
         )
     assert vaga is not None
     assert vaga["liberado_em"] is None
@@ -372,50 +366,48 @@ async def test_criar_agente_vincula_automaticamente_a_licenca_ativa_da_empresa(p
 
 
 @pytest.mark.asyncio
-async def test_criar_agente_sem_licenca_ativa_nao_cria_nenhum_vinculo(pool, empresa_factory):
+async def test_criar_agente_sem_licenca_ativa_nao_cria_nenhum_vinculo(db, empresa_factory):
     """Uma empresa sem NENHUMA licença ativa (licenciamento continua
     opcional -- ver migrations/0019_licenciamento.sql) cria agentes
     normalmente, sem vínculo nenhum. Cobre também o caso "a única licença
     que existe já foi revogada" -- não é só "nunca teve licença nenhuma"."""
     empresa_id = await empresa_factory("Empresa Agentes D1 Sem Licenca Ativa")
-    plano_id = await _plano_id_teste(pool)
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    plano_id = await _plano_id_teste(db)
+    async with db.tenant_session(empresa_id) as conn:
         licenca, _ = await servico_licenciamento.criar_licenca(conn, empresa_id, plano_id)
         await servico_licenciamento.revogar_licenca(conn, empresa_id, licenca["id"])
 
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-d1-sem-licenca-ativa")
 
-        vaga = await conn.fetchrow("SELECT id FROM licencas_endpoints WHERE agente_id = $1", agente["id"])
+        vaga = await buscar_um(conn, "SELECT id FROM licencas_endpoints WHERE agente_id = $1", agente["id"])
     assert agente is not None
     assert vaga is None
 
 
 @pytest.mark.asyncio
-async def test_criar_agente_alem_do_limite_da_licenca_falha_e_reverte_a_criacao_inteira(pool, empresa_factory):
+async def test_criar_agente_alem_do_limite_da_licenca_falha_e_reverte_a_criacao_inteira(db, empresa_factory):
     """O limite de `planos.max_endpoints` agora é aplicado NA CRIAÇÃO do
     agente (D1), não só numa chamada manual a registrar_endpoint -- e a
     falha reverte a transação INTEIRA (o agente não fica com uma linha
     'órfã' sem vaga): `LimiteEndpointsExcedidoError` só é levantada depois
     do INSERT de `agentes`, então só um rollback de verdade (exceção
-    escapando de `tenant_scoped_connection`, não só capturada com
+    escapando de `Database.tenant_session`, não só capturada com
     pytest.raises dentro do mesmo bloco) prova que nada ficou persistido."""
     empresa_id = await empresa_factory("Empresa Agentes D1 Limite Reverte Criacao")
-    plano_id = await _plano_id_teste(pool, max_endpoints=1)
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    plano_id = await _plano_id_teste(db, max_endpoints=1)
+    async with db.tenant_session(empresa_id) as conn:
         licenca, _ = await servico_licenciamento.criar_licenca(conn, empresa_id, plano_id)
         await servico.criar_agente(conn, empresa_id, "host-d1-limite-criacao-1")  # ocupa a única vaga
 
     with pytest.raises(servico_licenciamento.LimiteEndpointsExcedidoError):
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             await servico.criar_agente(conn, empresa_id, "host-d1-limite-criacao-2")
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
-        linha = await conn.fetchrow(
-            "SELECT id FROM agentes WHERE empresa_id = $1 AND hostname = $2",
+    async with db.tenant_session(empresa_id) as conn:
+        linha = await buscar_um(conn, "SELECT id FROM agentes WHERE empresa_id = $1 AND hostname = $2",
             empresa_id, "host-d1-limite-criacao-2",
         )
-        ocupadas = await conn.fetchval(
-            "SELECT count(*) FROM licencas_endpoints WHERE licenca_id = $1 AND liberado_em IS NULL", licenca["id"],
+        ocupadas = await valor(conn, "SELECT count(*) FROM licencas_endpoints WHERE licenca_id = $1 AND liberado_em IS NULL", licenca["id"],
         )
     assert linha is None  # o INSERT do agente foi revertido junto com o resto da transação
     assert ocupadas == 1  # continua só a vaga do primeiro agente
@@ -426,7 +418,7 @@ async def test_criar_agente_alem_do_limite_da_licenca_falha_e_reverte_a_criacao_
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_heartbeat_com_hostname_divergente_e_rejeitado_sem_gravar_nada(pool, empresa_factory):
+async def test_heartbeat_com_hostname_divergente_e_rejeitado_sem_gravar_nada(db, empresa_factory):
     """
     Item "should fix" (6) da revisão crítica (2026-09): o token identifica
     UM agente ligado a UM hostname registrado na criação -- o campo
@@ -438,7 +430,7 @@ async def test_heartbeat_com_hostname_divergente_e_rejeitado_sem_gravar_nada(poo
     hostname Y" não deveria simplesmente desaparecer.
     """
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Hostname Divergente")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-verdadeiro")
 
         with pytest.raises(servico.AgenteHostnameDivergenteError):
@@ -446,14 +438,11 @@ async def test_heartbeat_com_hostname_divergente_e_rejeitado_sem_gravar_nada(poo
                 conn, empresa_id, agente["id"], "host-fingido", "linux", "0.1.0", 42, [], None,
             )
 
-        eventos_heartbeat = await conn.fetch(
-            "SELECT tipo FROM agentes_eventos WHERE agente_id = $1", agente["id"],
+        eventos_heartbeat = await buscar(conn, "SELECT tipo FROM agentes_eventos WHERE agente_id = $1", agente["id"],
         )
-        linha_agente = await conn.fetchrow(
-            "SELECT ultimo_heartbeat_em FROM agentes WHERE id = $1", agente["id"],
+        linha_agente = await buscar_um(conn, "SELECT ultimo_heartbeat_em FROM agentes WHERE id = $1", agente["id"],
         )
-        auditoria = await conn.fetchrow(
-            "SELECT acao, detalhes FROM auditoria WHERE empresa_id = $1 AND acao = 'agente.heartbeat_hostname_divergente'",
+        auditoria = await buscar_um(conn, "SELECT acao, detalhes FROM auditoria WHERE empresa_id = $1 AND acao = 'agente.heartbeat_hostname_divergente'",
             empresa_id,
         )
 
@@ -466,7 +455,7 @@ async def test_heartbeat_com_hostname_divergente_e_rejeitado_sem_gravar_nada(poo
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_tolera_diferenca_de_maiuscula_e_espaco_no_hostname(pool, empresa_factory):
+async def test_heartbeat_tolera_diferenca_de_maiuscula_e_espaco_no_hostname(db, empresa_factory):
     """
     Correção de bug de revisão crítica (2026-09), segunda rodada: a
     comparação de hostname original era um `==` byte a byte -- hostname do
@@ -478,7 +467,7 @@ async def test_heartbeat_tolera_diferenca_de_maiuscula_e_espaco_no_hostname(pool
     persistido/exibido em `agentes.hostname`.
     """
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Hostname Tolerante")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "Servidor-Web-01")
 
         # diferença só de caixa
@@ -493,17 +482,17 @@ async def test_heartbeat_tolera_diferenca_de_maiuscula_e_espaco_no_hostname(pool
         )
         assert incidente_2 is None
 
-        linha_agente = await conn.fetchrow("SELECT hostname FROM agentes WHERE id = $1", agente["id"])
+        linha_agente = await buscar_um(conn, "SELECT hostname FROM agentes WHERE id = $1", agente["id"])
     # o valor PERSISTIDO/exibido nunca muda -- só a comparação ficou tolerante.
     assert linha_agente["hostname"] == "Servidor-Web-01"
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_ainda_rejeita_hostname_realmente_diferente_apos_normalizar(pool, empresa_factory):
+async def test_heartbeat_ainda_rejeita_hostname_realmente_diferente_apos_normalizar(db, empresa_factory):
     """A tolerância é só para maiúscula/espaço -- um hostname genuinamente
     diferente continua rejeitado."""
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Hostname Ainda Rejeita")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "servidor-a")
         with pytest.raises(servico.AgenteHostnameDivergenteError):
             await servico.registrar_heartbeat(
@@ -512,19 +501,17 @@ async def test_heartbeat_ainda_rejeita_hostname_realmente_diferente_apos_normali
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_sem_processos_suspeitos_nao_cria_incidente_mas_grava_evento(pool, empresa_factory):
+async def test_heartbeat_sem_processos_suspeitos_nao_cria_incidente_mas_grava_evento(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Limpo")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-limpo")
 
         incidente = await servico.registrar_heartbeat(
             conn, empresa_id, agente["id"], "host-heartbeat-limpo", "linux", "0.1.0", 42, [], None,
         )
-        eventos = await conn.fetch(
-            "SELECT tipo FROM agentes_eventos WHERE agente_id = $1", agente["id"],
+        eventos = await buscar(conn, "SELECT tipo FROM agentes_eventos WHERE agente_id = $1", agente["id"],
         )
-        linha_agente = await conn.fetchrow(
-            "SELECT ultimo_heartbeat_em, sistema_operacional FROM agentes WHERE id = $1", agente["id"],
+        linha_agente = await buscar_um(conn, "SELECT ultimo_heartbeat_em, sistema_operacional FROM agentes WHERE id = $1", agente["id"],
         )
 
     assert incidente is None
@@ -534,9 +521,9 @@ async def test_heartbeat_sem_processos_suspeitos_nao_cria_incidente_mas_grava_ev
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_com_processo_suspeito_cria_incidente_origem_endpoint(pool, empresa_factory):
+async def test_heartbeat_com_processo_suspeito_cria_incidente_origem_endpoint(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Suspeito")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-suspeito")
 
         # Nome genérico (não bate com _INDICADORES_CRITICOS) -- este teste
@@ -548,8 +535,7 @@ async def test_heartbeat_com_processo_suspeito_cria_incidente_origem_endpoint(po
             conn, empresa_id, agente["id"], "host-heartbeat-suspeito", "windows", "0.1.0", 100, processos, None,
         )
         tipos_evento = {
-            r["tipo"] for r in await conn.fetch(
-                "SELECT tipo FROM agentes_eventos WHERE agente_id = $1", agente["id"],
+            r["tipo"] for r in await buscar(conn, "SELECT tipo FROM agentes_eventos WHERE agente_id = $1", agente["id"],
             )
         }
 
@@ -561,7 +547,7 @@ async def test_heartbeat_com_processo_suspeito_cria_incidente_origem_endpoint(po
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_com_indicador_critico_conhecido_cria_incidente_critical(pool, empresa_factory):
+async def test_heartbeat_com_indicador_critico_conhecido_cria_incidente_critical(db, empresa_factory):
     """
     Correção de bug de revisão crítica (2026-09): um único processo
     batendo com um indicador de ferramenta de ataque conhecida (ex.:
@@ -572,7 +558,7 @@ async def test_heartbeat_com_indicador_critico_conhecido_cria_incidente_critical
     72h sem revisão humana.
     """
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Indicador Critico")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-indicador-critico")
         processos = [{"pid": 4321, "nome": "mimikatz", "usuario": "SYSTEM", "linha_de_comando": "mimikatz.exe"}]
         incidente = await servico.registrar_heartbeat(
@@ -585,7 +571,7 @@ async def test_heartbeat_com_indicador_critico_conhecido_cria_incidente_critical
 
 
 @pytest.mark.asyncio
-async def test_heartbeats_consecutivos_do_mesmo_processo_nao_abrem_incidente_novo_a_cada_ciclo(pool, empresa_factory):
+async def test_heartbeats_consecutivos_do_mesmo_processo_nao_abrem_incidente_novo_a_cada_ciclo(db, empresa_factory):
     """
     Correção de bug de revisão crítica (2026-09), segunda rodada: um
     processo suspeito RESIDENTE (mimikatz que continua rodando) abria um
@@ -596,7 +582,7 @@ async def test_heartbeats_consecutivos_do_mesmo_processo_nao_abrem_incidente_nov
     ficam todos registrados (histórico completo, não sobrescrito).
     """
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Dedup")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-dedup")
         processos = [{"pid": 4321, "nome": "mimikatz", "usuario": "SYSTEM", "linha_de_comando": "mimikatz.exe"}]
 
@@ -610,11 +596,9 @@ async def test_heartbeats_consecutivos_do_mesmo_processo_nao_abrem_incidente_nov
             conn, empresa_id, agente["id"], "host-heartbeat-dedup", "windows", "0.1.0", 100, processos, None,
         )
 
-        total_incidentes = await conn.fetchval(
-            "SELECT count(*) FROM incidentes WHERE empresa_id = $1 AND agente_id = $2", empresa_id, agente["id"],
+        total_incidentes = await valor(conn, "SELECT count(*) FROM incidentes WHERE empresa_id = $1 AND agente_id = $2", empresa_id, agente["id"],
         )
-        linha = await conn.fetchrow(
-            "SELECT ataques FROM incidentes WHERE incident_id = $1", incidente_1["incident_id"],
+        linha = await buscar_um(conn, "SELECT ataques FROM incidentes WHERE incident_id = $1", incidente_1["incident_id"],
         )
 
     assert incidente_1["incident_id"] == incidente_2["incident_id"] == incidente_3["incident_id"]
@@ -624,13 +608,13 @@ async def test_heartbeats_consecutivos_do_mesmo_processo_nao_abrem_incidente_nov
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_abre_novo_incidente_apos_o_anterior_ser_resolvido(pool, empresa_factory):
+async def test_heartbeat_abre_novo_incidente_apos_o_anterior_ser_resolvido(db, empresa_factory):
     """A deduplicação só vale enquanto o incidente anterior está
     OPEN/EM_ANDAMENTO -- depois de RESOLVIDO/FALSO_POSITIVO (um humano ou a
     auto-triagem já julgou aquele caso), uma detecção nova abre um
     incidente NOVO de propósito."""
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Dedup Reaberto")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-dedup-reaberto")
         processos = [{"pid": 1, "nome": "mimikatz"}]
 
@@ -643,8 +627,7 @@ async def test_heartbeat_abre_novo_incidente_apos_o_anterior_ser_resolvido(pool,
             conn, empresa_id, agente["id"], "host-heartbeat-dedup-reaberto", "windows", "0.1.0", 100, processos, None,
         )
 
-        total_incidentes = await conn.fetchval(
-            "SELECT count(*) FROM incidentes WHERE empresa_id = $1 AND agente_id = $2", empresa_id, agente["id"],
+        total_incidentes = await valor(conn, "SELECT count(*) FROM incidentes WHERE empresa_id = $1 AND agente_id = $2", empresa_id, agente["id"],
         )
 
     assert incidente_2["incident_id"] != incidente_1["incident_id"]
@@ -652,13 +635,13 @@ async def test_heartbeat_abre_novo_incidente_apos_o_anterior_ser_resolvido(pool,
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_dedup_escala_severidade_mas_nunca_rebaixa(pool, empresa_factory):
+async def test_heartbeat_dedup_escala_severidade_mas_nunca_rebaixa(db, empresa_factory):
     """Um processo indicador crítico (CRITICAL/95) seguido de um processo
     genérico (MEDIUM/55) no mesmo incidente aberto NÃO deve rebaixar a
     severidade -- e o caminho inverso (genérico depois crítico) deve
     escalar."""
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat Dedup Severidade")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-dedup-severidade")
 
         incidente_1 = await servico.registrar_heartbeat(
@@ -677,9 +660,9 @@ async def test_heartbeat_dedup_escala_severidade_mas_nunca_rebaixa(pool, empresa
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_usa_ip_local_quando_informado(pool, empresa_factory):
+async def test_heartbeat_usa_ip_local_quando_informado(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Heartbeat IP")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, _ = await servico.criar_agente(conn, empresa_id, "host-heartbeat-ip")
         incidente = await servico.registrar_heartbeat(
             conn, empresa_id, agente["id"], "host-heartbeat-ip", "linux", "0.1.0", 10,
@@ -689,19 +672,19 @@ async def test_heartbeat_usa_ip_local_quando_informado(pool, empresa_factory):
 
 
 @pytest.mark.asyncio
-async def test_heartbeats_de_agentes_de_empresas_diferentes_nao_se_misturam(pool, empresa_factory):
+async def test_heartbeats_de_agentes_de_empresas_diferentes_nao_se_misturam(db, empresa_factory):
     empresa_a = await empresa_factory("Empresa Agentes Heartbeat Cross A")
     empresa_b = await empresa_factory("Empresa Agentes Heartbeat Cross B")
 
-    async with tenant_scoped_connection(pool, empresa_a) as conn_a:
+    async with db.tenant_session(empresa_a) as conn_a:
         agente_a, _ = await servico.criar_agente(conn_a, empresa_a, "host-cross-hb-a")
         await servico.registrar_heartbeat(
             conn_a, empresa_a, agente_a["id"], "host-cross-hb-a", "linux", "0.1.0", 5,
             [{"pid": 1, "nome": "nmap"}], None,
         )
 
-    async with tenant_scoped_connection(pool, empresa_b) as conn_b:
-        incidentes_b = await conn_b.fetch("SELECT incident_id FROM incidentes WHERE origem = 'endpoint'")
+    async with db.tenant_session(empresa_b) as conn_b:
+        incidentes_b = await buscar(conn_b, "SELECT incident_id FROM incidentes WHERE origem = 'endpoint'")
     assert incidentes_b == []
 
 
@@ -713,32 +696,32 @@ async def test_heartbeats_de_agentes_de_empresas_diferentes_nao_se_misturam(pool
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_autenticar_agente_com_token_valido(pool, empresa_factory):
+async def test_autenticar_agente_com_token_valido(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Autenticar")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, token = await servico.criar_agente(conn, empresa_id, "host-autenticar")
 
-    resultado = await autenticar_agente(pool, token)
+    resultado = await autenticar_agente(db, token)
     # autenticar_agente devolve o Record cru do asyncpg (não passa por
     # _publico()) -- agente_id/empresa_id saem como uuid.UUID, não str.
     assert resultado == {"agente_id": uuid.UUID(agente["id"]), "empresa_id": empresa_id, "hostname": "host-autenticar"}
 
 
 @pytest.mark.asyncio
-async def test_autenticar_agente_com_token_errado_falha(pool, empresa_factory):
+async def test_autenticar_agente_com_token_errado_falha(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Autenticar Errado")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         await servico.criar_agente(conn, empresa_id, "host-autenticar-errado")
 
-    assert await autenticar_agente(pool, "agt_000000000000_token-forjado-qualquer") is None
-    assert await autenticar_agente(pool, "token-sem-formato-nenhum") is None
+    assert await autenticar_agente(db, "agt_000000000000_token-forjado-qualquer") is None
+    assert await autenticar_agente(db, "token-sem-formato-nenhum") is None
 
 
 @pytest.mark.asyncio
-async def test_autenticar_agente_revogado_falha(pool, empresa_factory):
+async def test_autenticar_agente_revogado_falha(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Agentes Autenticar Revogado")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         agente, token = await servico.criar_agente(conn, empresa_id, "host-autenticar-revogado")
         await servico.revogar_agente(conn, empresa_id, agente["id"])
 
-    assert await autenticar_agente(pool, token) is None
+    assert await autenticar_agente(db, token) is None

@@ -7,7 +7,7 @@
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import delete, desc, func, literal, literal_column, select, update
+from sqlalchemy import delete, desc, exists, func, literal, literal_column, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sentinela.models import (
@@ -15,6 +15,7 @@ from sentinela.models import (
     EdrTelemetria,
     EventoSiem,
     EventoSiemCold,
+    SiemAgenteFonte,
     SiemCorrelacao,
     SiemFonte,
     SigmaAlerta,
@@ -160,6 +161,24 @@ class SiemFonteRepositorio(RepositorioBase):
     async def excluir(self, empresa_id, fonte_id: int) -> bool:
         stmt = delete(SiemFonte).where(SiemFonte.empresa_id == empresa_id, SiemFonte.id == fonte_id)
         return (await self.sessao.execute(stmt)).rowcount > 0
+
+
+class SiemAgenteFonteRepositorio(RepositorioBase):
+    async def somar_lote(self, empresa_id, agente_id, por_tipo: dict) -> None:
+        """Soma SÓ o lote atual por tipo de fonte. `sorted()`: ordem de lock determinística entre lotes concorrentes."""
+        for tipo, (ultimo_em, total) in sorted(por_tipo.items()):
+            novo = pg_insert(SiemAgenteFonte).values(
+                empresa_id=empresa_id, agente_id=agente_id, tipo=tipo, ultimo_evento_em=ultimo_em, total_eventos=total
+            )
+            await self.sessao.execute(
+                novo.on_conflict_do_update(
+                    index_elements=["agente_id", "tipo"],
+                    set_={
+                        "ultimo_evento_em": func.greatest(SiemAgenteFonte.ultimo_evento_em, novo.excluded.ultimo_evento_em),
+                        "total_eventos": SiemAgenteFonte.total_eventos + novo.excluded.total_eventos,
+                    },
+                )
+            )
 
 
 class CorrelacaoRepositorio(RepositorioBase):
@@ -374,6 +393,28 @@ class EdrRepositorio(RepositorioBase):
             EdrTelemetria.id, EdrTelemetria.criado_em
         )
         return dict((await self.sessao.execute(stmt)).one()._mapping)
+
+    async def inserir_processo_suspeito_deduplicado(
+        self, empresa_id, agente_id, hostname, processo, pid, usuario, detalhes: dict
+    ) -> None:
+        """Grava um processo suspeito, a menos que (agente, pid, processo) já tenha sido gravado na última hora."""
+        t = EdrTelemetria
+        ja_existe = exists().where(
+            t.empresa_id == empresa_id, t.agente_id == agente_id, t.pid.is_not_distinct_from(pid),
+            t.processo.is_not_distinct_from(processo), t.criado_em > func.now() - timedelta(hours=1),
+        )
+        origem = select(
+            literal(empresa_id, t.empresa_id.type), literal(agente_id, t.agente_id.type),
+            literal("processo_suspeito"), literal(hostname, t.hostname.type), literal(processo, t.processo.type),
+            literal(pid, t.pid.type), literal(usuario, t.usuario.type), literal(detalhes, t.detalhes.type),
+            literal("HIGH"),
+        ).where(~ja_existe)
+        await self.sessao.execute(
+            pg_insert(t).from_select(
+                ["empresa_id", "agente_id", "tipo", "hostname", "processo", "pid", "usuario", "detalhes", "severidade"],
+                origem,
+            )
+        )
 
     async def listar(self, empresa_id, limite: int) -> list[dict]:
         t = EdrTelemetria

@@ -29,8 +29,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sentinela.database.config import PAPEL_APP_SUPERADMIN, PAPEL_APP_TENANT, DatabaseSettings
-from sentinela.database.compat_asyncpg import SessaoComCompat
 from sentinela.database.engine import criar_engine
+from sentinela.database.sessao import Sessao
 
 
 class Database:
@@ -38,7 +38,7 @@ class Database:
 
     def __init__(self, engine: AsyncEngine):
         self.engine = engine
-        self.sessionmaker = async_sessionmaker(engine, class_=SessaoComCompat, expire_on_commit=False, autoflush=False)
+        self.sessionmaker = async_sessionmaker(engine, class_=Sessao, expire_on_commit=False, autoflush=False)
 
     @classmethod
     def conectar(cls, config: DatabaseSettings) -> "Database":

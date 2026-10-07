@@ -91,7 +91,7 @@ async def conexao_tenant_web(usuario: dict = Depends(exigir_login_web), request:
     """Ver AcessoEmpresaSuspensaError/SessaoInvalidaError -- reforço em tempo real que espelha auth/dependencies.py:conexao_tenant,
     incluindo a checagem de token_version ("tv") contra troca de senha (migrations/0011_token_version.sql) e de
     `empresa_id = $2` contra adulteração dessa claim no JWT (ver o comentário longo em auth/dependencies.py:conexao_tenant)."""
-    async with request.app.state.pool.tenant_session(usuario["empresa_id"]) as sessao:
+    async with request.app.state.db.tenant_session(usuario["empresa_id"]) as sessao:
         status = await EmpresaRepositorio(sessao).obter_status(usuario["empresa_id"])
         if status != "ativa":
             raise AcessoEmpresaSuspensaError(status)
@@ -110,7 +110,7 @@ async def conexao_superadmin_web(su: dict = Depends(exigir_superadmin_web), requ
     """Ver auth/dependencies.py:conexao_superadmin -- mesmo reforço em tempo real (token_version, "tv",
     e a partir da Fase C também `papel` / "papel_saas"), espelhado aqui pelo mesmo motivo que
     conexao_tenant_web espelha conexao_tenant (redirect em vez de 401 JSON)."""
-    async with request.app.state.pool.superadmin_session() as sessao:
+    async with request.app.state.db.superadmin_session() as sessao:
         linha = await SuperadminRepositorio(sessao).obter_para_sessao(su["sub"])
         papel_saas_no_token = su.get("papel_saas") or "saas_owner"
         if (

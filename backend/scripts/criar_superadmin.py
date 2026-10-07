@@ -31,26 +31,22 @@ import argparse
 import asyncio
 import os
 
-import asyncpg
-
 from sentinela.auth.security import hash_senha, validar_politica_senha
+from sentinela.database import Database, DatabaseSettings
+from sentinela.repositories.superadmins import SuperadminRepositorio
 
 
 async def criar_superadmin(database_url_admin: str, email: str, senha: str) -> bool:
     validar_politica_senha(senha)
-    conn = await asyncpg.connect(database_url_admin)
+    db = Database.conectar(DatabaseSettings(url=database_url_admin, pool_size=1, max_overflow=0))
     try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO superadmins (email, senha_hash) VALUES ($1, $2)
-            ON CONFLICT (email) DO NOTHING
-            RETURNING id
-            """,
-            email, hash_senha(senha),
-        )
-        return row is not None
+        async with db.superadmin_session() as sessao:
+            conta = await SuperadminRepositorio(sessao).inserir_ignorando_email_duplicado(
+                email, hash_senha(senha), "saas_owner",
+            )
+        return conta is not None
     finally:
-        await conn.close()
+        await db.fechar()
 
 
 def _construir_parser():

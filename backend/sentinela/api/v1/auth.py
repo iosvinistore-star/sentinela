@@ -17,7 +17,6 @@ from sentinela.auth.dependencies import (
 )
 from sentinela.auth.login import ContaEmpresaInativaError, autenticar
 from sentinela.auth.security import decodificar_token_sessao, emitir_token_sessao
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
 from sentinela.services import mfa as servico_mfa
 from sentinela.services import refresh_tokens as servico_refresh
 from sentinela.services import redefinicao_senha as servico_redefinicao
@@ -92,10 +91,10 @@ def _montar_payload_sessao(credenciais: dict) -> dict:
     return payload
 
 
-async def _registrar_evento_login(pool, *, empresa_id, usuario_id, acao: str, detalhes: dict):
+async def _registrar_evento_login(db, *, empresa_id, usuario_id, acao: str, detalhes: dict):
     """
     Best-effort (nunca deve derrubar o fluxo de login por uma falha de
-    auditoria). Usa `superadmin_scoped_connection` (BYPASSRLS) porque, no
+    auditoria). Usa `Database.superadmin_session` (BYPASSRLS) porque, no
     momento do login, ainda NÃO existe uma sessão/conexão tenant-scoped --
     autenticar-se É o que está sendo tentado. Mesmo padrão que
     `api/v1/admin.py` já usa para inserir em `usuarios` de uma empresa
@@ -104,9 +103,9 @@ async def _registrar_evento_login(pool, *, empresa_id, usuario_id, acao: str, de
     try:
         from sentinela.services import auditoria as servico_auditoria
 
-        async with superadmin_scoped_connection(pool) as conn:
+        async with db.superadmin_session() as sessao:
             await servico_auditoria.registrar_evento(
-                conn, empresa_id, acao, detalhes,
+                sessao, empresa_id, acao, detalhes,
                 ator_usuario_id=usuario_id if empresa_id else None,
                 ator_superadmin_id=usuario_id if not empresa_id else None,
             )
@@ -117,7 +116,7 @@ async def _registrar_evento_login(pool, *, empresa_id, usuario_id, acao: str, de
 @router.post("/login")
 async def login(dados: LoginRequest, request: Request, response: Response):
     settings = request.app.state.settings
-    pool = request.app.state.pool
+    db = request.app.state.db
     limitador = request.app.state.limitador_login
     ip_cliente = obter_ip_cliente(request, settings.proxies_confiaveis)
     chave = f"login:{ip_cliente}"
@@ -130,13 +129,13 @@ async def login(dados: LoginRequest, request: Request, response: Response):
         )
 
     try:
-        credenciais = await autenticar(pool, dados.email, dados.senha)
+        credenciais = await autenticar(db, dados.email, dados.senha)
     except ContaEmpresaInativaError as exc:
         await limitador.registrar_sucesso(chave)  # senha certa -- não é força bruta
         raise HTTPException(status_code=403, detail=f"empresa {exc.status} -- acesso bloqueado")
     if credenciais is None:
         await _registrar_evento_login(
-            pool, empresa_id=None, usuario_id=None, acao="LOGIN_FAILURE",
+            db, empresa_id=None, usuario_id=None, acao="LOGIN_FAILURE",
             detalhes={"email": dados.email.strip().lower(), "ip": ip_cliente},
         )
         raise HTTPException(status_code=401, detail="email ou senha inválidos")
@@ -157,11 +156,11 @@ async def login(dados: LoginRequest, request: Request, response: Response):
 
     token = emitir_token_sessao(payload, settings.jwt_secret, settings.sessao_horas)
     response.set_cookie(value=token, **_cookie_kwargs(settings))
-    async with superadmin_scoped_connection(pool) as conn_refresh:
-        refresh, _ = await servico_refresh.criar(conn_refresh, credenciais["tipo"], credenciais["id"], credenciais["token_version"])
+    async with db.superadmin_session() as sessao_refresh:
+        refresh, _ = await servico_refresh.criar(sessao_refresh, credenciais["tipo"], credenciais["id"], credenciais["token_version"])
     response.set_cookie(value=refresh, **_refresh_cookie_kwargs(settings))
     await _registrar_evento_login(
-        pool, empresa_id=payload["empresa_id"], usuario_id=payload["sub"], acao="LOGIN_SUCCESS",
+        db, empresa_id=payload["empresa_id"], usuario_id=payload["sub"], acao="LOGIN_SUCCESS",
         detalhes={"email": payload["email"], "ip": ip_cliente},
     )
 
@@ -177,7 +176,7 @@ async def mfa_verificar(dados: MfaVerificarRequest, request: Request, response: 
     código TOTP OU um recovery code, e só então emite a sessão completa.
     """
     settings = request.app.state.settings
-    pool = request.app.state.pool
+    db = request.app.state.db
 
     try:
         pre_auth = decodificar_token_sessao(dados.pre_auth_token, settings.jwt_secret)
@@ -199,14 +198,14 @@ async def mfa_verificar(dados: MfaVerificarRequest, request: Request, response: 
         )
 
     if pre_auth.get("papel") == "superadmin":
-        async with superadmin_scoped_connection(pool) as conn:
+        async with db.superadmin_session() as sessao:
             ok = await servico_mfa.verificar_no_login_superadmin(
-                conn, settings.mfa_encryption_key, usuario_id, codigo=dados.codigo, recovery_code=dados.recovery_code,
+                sessao, settings.mfa_encryption_key, usuario_id, codigo=dados.codigo, recovery_code=dados.recovery_code,
             )
     else:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as sessao:
             ok = await servico_mfa.verificar_no_login(
-                conn, settings.mfa_encryption_key, empresa_id, usuario_id, codigo=dados.codigo, recovery_code=dados.recovery_code,
+                sessao, settings.mfa_encryption_key, empresa_id, usuario_id, codigo=dados.codigo, recovery_code=dados.recovery_code,
             )
     if not ok:
         raise HTTPException(status_code=401, detail="código ou recovery code inválido")
@@ -215,11 +214,11 @@ async def mfa_verificar(dados: MfaVerificarRequest, request: Request, response: 
     payload = {k: v for k, v in pre_auth.items() if k not in ("purpose", "iat", "exp")}
     token = emitir_token_sessao(payload, settings.jwt_secret, settings.sessao_horas)
     response.set_cookie(value=token, **_cookie_kwargs(settings))
-    async with superadmin_scoped_connection(pool) as conn_refresh:
-        refresh, _ = await servico_refresh.criar(conn_refresh, "superadmin" if payload.get("papel") == "superadmin" else "usuario", payload["sub"], payload["tv"])
+    async with db.superadmin_session() as sessao_refresh:
+        refresh, _ = await servico_refresh.criar(sessao_refresh, "superadmin" if payload.get("papel") == "superadmin" else "usuario", payload["sub"], payload["tv"])
     response.set_cookie(value=refresh, **_refresh_cookie_kwargs(settings))
     await _registrar_evento_login(
-        pool, empresa_id=payload["empresa_id"], usuario_id=payload["sub"], acao="LOGIN_SUCCESS",
+        db, empresa_id=payload["empresa_id"], usuario_id=payload["sub"], acao="LOGIN_SUCCESS",
         detalhes={"email": payload["email"], "mfa": True},
     )
     return {"usuario": {**payload, "id": payload["sub"]}}
@@ -228,28 +227,21 @@ async def mfa_verificar(dados: MfaVerificarRequest, request: Request, response: 
 @router.post("/refresh", dependencies=[Depends(exigir_csrf_header)])
 async def refresh(request: Request, response: Response):
     settings = request.app.state.settings
-    pool = request.app.state.pool
+    db = request.app.state.db
     token = request.cookies.get(NOME_COOKIE_REFRESH)
     if not token:
         raise HTTPException(status_code=401, detail="refresh token ausente")
-    async with superadmin_scoped_connection(pool) as conn:
-        resultado, erro = await servico_refresh.rotacionar(conn, token)
-        if erro:
-            raise HTTPException(status_code=401, detail="refresh token inválido, expirado ou reutilizado")
-        if resultado["conta_tipo"] == "superadmin":
-            row = await conn.fetchrow("SELECT id,email,papel,token_version,mfa_habilitado FROM superadmins WHERE id=$1", resultado["conta_id"])
-            if row is None or row["token_version"] != resultado["token_version"]:
-                raise HTTPException(status_code=401, detail="sessão inválida")
-            payload={"sub":str(row["id"]),"empresa_id":None,"papel":"superadmin","email":row["email"],"tv":row["token_version"],"papel_saas":row["papel"]}
-        else:
-            row = await conn.fetchrow("SELECT id,empresa_id,email,papel,token_version,ativo FROM usuarios WHERE id=$1", resultado["conta_id"])
-            if row is None or not row["ativo"] or row["token_version"] != resultado["token_version"]:
-                raise HTTPException(status_code=401, detail="sessão inválida")
-            payload={"sub":str(row["id"]),"empresa_id":str(row["empresa_id"]),"papel":row["papel"],"email":row["email"],"tv":row["token_version"]}
-        access=emitir_token_sessao(payload, settings.jwt_secret, settings.sessao_horas)
-        response.set_cookie(value=access, **_cookie_kwargs(settings))
-        response.set_cookie(value=resultado["novo_token"], **_refresh_cookie_kwargs(settings))
-        return {"ok":True,"usuario":{**payload,"id":payload["sub"]}}
+    async with db.superadmin_session() as sessao:
+        payload, novo_refresh, erro = await servico_refresh.renovar_sessao(sessao, token)
+    # Fora da sessão de propósito: levantar de dentro dela faria rollback da revogação gravada num replay.
+    if erro == "sessao_invalida":
+        raise HTTPException(status_code=401, detail="sessão inválida")
+    if erro:
+        raise HTTPException(status_code=401, detail="refresh token inválido, expirado ou reutilizado")
+    access = emitir_token_sessao(payload, settings.jwt_secret, settings.sessao_horas)
+    response.set_cookie(value=access, **_cookie_kwargs(settings))
+    response.set_cookie(value=novo_refresh, **_refresh_cookie_kwargs(settings))
+    return {"ok": True, "usuario": {**payload, "id": payload["sub"]}}
 
 
 @router.post("/logout", dependencies=[Depends(exigir_csrf_header)])
@@ -293,21 +285,21 @@ async def esqueci_senha(dados: SolicitarRedefinicaoRequest, request: Request):
             headers={"Retry-After": str(int(restante) + 1)},
         )
 
-    pool = request.app.state.pool
+    db = request.app.state.db
     # Prefere a URL pública fixa (SENTINELA_URL_BASE_PUBLICA) -- só cai para
     # `request.base_url` (derivado do cabeçalho Host, controlado pelo
     # cliente) quando ela não está configurada, o que só acontece fora de
     # produção (ver Settings.validar() em config.py). Ver o comentário do
     # campo `url_base_publica` para o porquê disto ser necessário.
     url_base = request.app.state.settings.url_base_publica or str(request.base_url)
-    await servico_redefinicao.solicitar_redefinicao(pool, dados.email, url_base)
+    await servico_redefinicao.solicitar_redefinicao(db, dados.email, url_base)
     return {"ok": True}
 
 
 @router.post("/redefinir-senha", dependencies=[Depends(exigir_csrf_header)])
 async def redefinir_senha(dados: ConfirmarRedefinicaoRequest, request: Request):
-    pool = request.app.state.pool
-    ok = await servico_redefinicao.confirmar_redefinicao(pool, dados.token, dados.senha_nova)
+    db = request.app.state.db
+    ok = await servico_redefinicao.confirmar_redefinicao(db, dados.token, dados.senha_nova)
     if not ok:
         raise HTTPException(status_code=400, detail="link inválido ou expirado")
     return {"ok": True}

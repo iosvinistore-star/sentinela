@@ -20,7 +20,6 @@ Duas famílias de rota bem diferentes aqui, de propósito:
     agente que nunca teve cookie nenhum).
 """
 import uuid
-import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -39,6 +38,7 @@ from sentinela.auth.dependencies import (
 from sentinela.services import agentes as servico
 from sentinela.services import chave_ativacao
 from sentinela.services import enrollment as servico_enrollment
+from sentinela.services import siem as servico_siem
 from sentinela.services.agentes import AgenteHostnameDivergenteError
 from sentinela.services.enrollment import TokenEnrollmentInvalidoError
 from sentinela.services.licenciamento import LimiteEndpointsExcedidoError
@@ -123,13 +123,13 @@ class HeartbeatRequest(BaseModel):
 
 
 @router.get("")
-async def listar_agentes(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return {"agentes": await servico.listar_agentes(conn)}
+async def listar_agentes(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return {"agentes": await servico.listar_agentes(sessao)}
 
 
 @router.post("", dependencies=[Depends(exigir_csrf_header)])
 async def criar_agente(dados: CriarAgenteRequest, usuario: dict = Depends(exigir_papel("admin")),
-                         conn=Depends(conexao_tenant)):
+                         sessao=Depends(conexao_tenant)):
     # Fase D / D1 -- `servico.criar_agente` agora tenta vincular o agente
     # novo à licença ativa da empresa (se houver uma), ocupando uma vaga de
     # `licencas_endpoints` -- ver o docstring lá para o raciocínio completo.
@@ -139,7 +139,7 @@ async def criar_agente(dados: CriarAgenteRequest, usuario: dict = Depends(exigir
     # hostname duplicado (os dois são "não dá pra criar este agente agora",
     # com motivos diferentes no corpo da resposta).
     try:
-        agente, token = await servico.criar_agente(conn, usuario["empresa_id"], dados.hostname, ator_usuario_id=usuario["sub"])
+        agente, token = await servico.criar_agente(sessao, usuario["empresa_id"], dados.hostname, ator_usuario_id=usuario["sub"])
     except LimiteEndpointsExcedidoError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if agente is None:
@@ -151,15 +151,15 @@ async def criar_agente(dados: CriarAgenteRequest, usuario: dict = Depends(exigir
 
 
 @router.post("/{agente_id}/kill-switch", dependencies=[Depends(exigir_csrf_header)])
-async def kill_switch_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    agente = await servico.definir_habilitado(conn, usuario["empresa_id"], str(agente_id), False, ator_usuario_id=usuario["sub"])
+async def kill_switch_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    agente = await servico.definir_habilitado(sessao, usuario["empresa_id"], str(agente_id), False, ator_usuario_id=usuario["sub"])
     if agente is None:
         raise HTTPException(status_code=404, detail="agente não encontrado")
     return {"agente": agente, "kill_switch": True}
 
 @router.post("/{agente_id}/reativar", dependencies=[Depends(exigir_csrf_header)])
-async def reativar_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    agente = await servico.definir_habilitado(conn, usuario["empresa_id"], str(agente_id), True, ator_usuario_id=usuario["sub"])
+async def reativar_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    agente = await servico.definir_habilitado(sessao, usuario["empresa_id"], str(agente_id), True, ator_usuario_id=usuario["sub"])
     if agente is None:
         raise HTTPException(status_code=404, detail="agente não encontrado")
     return {"agente": agente, "kill_switch": False}
@@ -167,8 +167,8 @@ async def reativar_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_p
 
 @router.post("/{agente_id}/revogar", dependencies=[Depends(exigir_csrf_header)])
 async def revogar_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_papel("admin")),
-                           conn=Depends(conexao_tenant)):
-    agente = await servico.revogar_agente(conn, usuario["empresa_id"], str(agente_id), ator_usuario_id=usuario["sub"])
+                           sessao=Depends(conexao_tenant)):
+    agente = await servico.revogar_agente(sessao, usuario["empresa_id"], str(agente_id), ator_usuario_id=usuario["sub"])
     if agente is None:
         raise HTTPException(status_code=404, detail="agente não encontrado")
     return {"agente": agente}
@@ -183,15 +183,15 @@ async def revogar_agente(agente_id: uuid.UUID, usuario: dict = Depends(exigir_pa
 # ---------------------------------------------------------------------------
 
 @router.get("/enrollment")
-async def listar_tokens_enrollment(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return {"tokens": await servico_enrollment.listar_tokens_enrollment(conn)}
+async def listar_tokens_enrollment(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return {"tokens": await servico_enrollment.listar_tokens_enrollment(sessao)}
 
 
 @router.post("/enrollment", dependencies=[Depends(exigir_csrf_header)])
 async def criar_token_enrollment(dados: CriarEnrollmentRequest, request: Request,
-                                   usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
+                                   usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
     token_publico, token = await servico_enrollment.criar_token_enrollment(
-        conn, usuario["empresa_id"], dados.expira_em, max_usos=dados.max_usos, ator_usuario_id=usuario["sub"],
+        sessao, usuario["empresa_id"], dados.expira_em, max_usos=dados.max_usos, ator_usuario_id=usuario["sub"],
     )
     # `token` só existe aqui -- nunca mais recuperável depois desta resposta
     # (só o hash persiste), mesma filosofia de criar_agente/criar_licenca.
@@ -203,9 +203,9 @@ async def criar_token_enrollment(dados: CriarEnrollmentRequest, request: Request
 
 @router.post("/enrollment/{enrollment_id}/revogar", dependencies=[Depends(exigir_csrf_header)])
 async def revogar_token_enrollment(enrollment_id: uuid.UUID, usuario: dict = Depends(exigir_papel("admin")),
-                                     conn=Depends(conexao_tenant)):
+                                     sessao=Depends(conexao_tenant)):
     token_publico = await servico_enrollment.revogar_token_enrollment(
-        conn, usuario["empresa_id"], str(enrollment_id), ator_usuario_id=usuario["sub"],
+        sessao, usuario["empresa_id"], str(enrollment_id), ator_usuario_id=usuario["sub"],
     )
     if token_publico is None:
         raise HTTPException(status_code=404, detail="token de enrollment não encontrado")
@@ -214,7 +214,7 @@ async def revogar_token_enrollment(enrollment_id: uuid.UUID, usuario: dict = Dep
 
 @router.post("/enroll")
 async def enroll(dados: EnrollRequest, enrollment: dict = Depends(enrollment_atual),
-                   conn=Depends(conexao_tenant_enrollment)):
+                   sessao=Depends(conexao_tenant_enrollment)):
     """
     Troca o token de enrollment (header `X-Sentinela-Enrollment-Token`) pela
     identidade PERMANENTE de um agente novo -- ver
@@ -224,7 +224,7 @@ async def enroll(dados: EnrollRequest, enrollment: dict = Depends(enrollment_atu
     hostname informado contra o REGISTRADO na criação).
     """
     try:
-        agente, token = await servico_enrollment.trocar_por_agente(conn, enrollment, dados.hostname)
+        agente, token = await servico_enrollment.trocar_por_agente(sessao, enrollment, dados.hostname)
     except TokenEnrollmentInvalidoError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LimiteEndpointsExcedidoError as exc:
@@ -235,7 +235,7 @@ async def enroll(dados: EnrollRequest, enrollment: dict = Depends(enrollment_atu
 
 
 @router.post("/heartbeat")
-async def heartbeat(dados: HeartbeatRequest, agente: dict = Depends(agente_atual), conn=Depends(conexao_tenant_agente)):
+async def heartbeat(dados: HeartbeatRequest, agente: dict = Depends(agente_atual), sessao=Depends(conexao_tenant_agente)):
     """
     `agente` (resolvido pelo token) e `conn` (tenant-scoped, resolvido por
     `conexao_tenant_agente` -- que por baixo também depende de
@@ -251,7 +251,7 @@ async def heartbeat(dados: HeartbeatRequest, agente: dict = Depends(agente_atual
     """
     try:
         incidente = await servico.registrar_heartbeat(
-            conn,
+            sessao,
             agente["empresa_id"],
             agente["agente_id"],
             dados.hostname,
@@ -270,18 +270,9 @@ async def heartbeat(dados: HeartbeatRequest, agente: dict = Depends(agente_atual
     # V8.2: deduplicado por (agente, pid, processo) na última hora -- antes o
     # mesmo processo era regravado a CADA heartbeat, indefinidamente.
     if dados.processos_suspeitos:
-        await conn.executemany(
-            """INSERT INTO edr_telemetria (empresa_id, agente_id, tipo, hostname, processo, pid, usuario, detalhes, severidade)
-               SELECT $1, $2, 'processo_suspeito', $3, $4, $5, $6, $7::jsonb, 'HIGH'
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM edr_telemetria
-                    WHERE empresa_id = $1 AND agente_id = $2 AND pid IS NOT DISTINCT FROM $5
-                      AND processo IS NOT DISTINCT FROM $4 AND criado_em > now() - interval '1 hour')""",
-            [
-                (agente["empresa_id"], agente["agente_id"], dados.hostname, proc.nome, proc.pid, proc.usuario,
-                 json.dumps({"linha_de_comando": proc.linha_de_comando, "origem": "heartbeat"}))
-                for proc in dados.processos_suspeitos
-            ],
+        await servico_siem.registrar_processos_suspeitos_edr(
+            sessao, agente["empresa_id"], agente["agente_id"], dados.hostname,
+            [p.model_dump() for p in dados.processos_suspeitos],
         )
     return {"status": "ok", "incidente_criado": incidente is not None, "incidente": incidente}
 
@@ -297,7 +288,7 @@ _MAX_ERROS_DETALHADOS = 20
 async def ingerir_eventos_agente(
     dados: EventosAgenteRequest,
     agente: dict = Depends(agente_atual),
-    conn=Depends(conexao_tenant_agente),
+    sessao=Depends(conexao_tenant_agente),
 ):
     """Ingestão autenticada pelo Agent (Windows Event Log, NetFlow/IPFIX, SNMP, logs Unix).
 
@@ -312,9 +303,7 @@ async def ingerir_eventos_agente(
     """
     from pydantic import ValidationError
 
-    from sentinela.siem.correlacao_siem import correlacionar_lote
     from sentinela.siem.modelos import EventoSIEMEntrada
-    from sentinela.siem.servico import persistir_eventos_com_ids
 
     if not dados.eventos:
         return {"recebidos": 0, "rejeitados": 0, "correlacoes": 0}
@@ -333,23 +322,7 @@ async def ingerir_eventos_agente(
     if not normalizados:
         raise HTTPException(status_code=422, detail={"mensagem": "nenhum evento válido no lote", "erros": erros[:_MAX_ERROS_DETALHADOS]})
 
-    ids = await persistir_eventos_com_ids(conn, empresa_id, normalizados, agente_id)
-    resultado = await correlacionar_lote(conn, empresa_id, list(zip(ids, normalizados)))
-
-    por_tipo: dict[str, tuple[datetime, int]] = {}
-    for ev in normalizados:
-        tipo = str(ev["source_type"])
-        ts, n = por_tipo.get(tipo, (ev["timestamp"], 0))
-        por_tipo[tipo] = (max(ts, ev["timestamp"]), n + 1)
-    await conn.executemany(
-        """INSERT INTO siem_agente_fontes (empresa_id, agente_id, tipo, ultimo_evento_em, total_eventos)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (agente_id, tipo) DO UPDATE
-               SET ultimo_evento_em = GREATEST(siem_agente_fontes.ultimo_evento_em, EXCLUDED.ultimo_evento_em),
-                   total_eventos = siem_agente_fontes.total_eventos + EXCLUDED.total_eventos""",
-        # sorted(): ordem de lock determinística entre lotes concorrentes (deadlock).
-        [(agente["empresa_id"], agente["agente_id"], tipo, ts, n) for tipo, (ts, n) in sorted(por_tipo.items())],
-    )
+    resultado = await servico_siem.ingerir_eventos_do_agente(sessao, empresa_id, agente_id, normalizados)
     return {
         "recebidos": len(normalizados),
         "rejeitados": len(erros),

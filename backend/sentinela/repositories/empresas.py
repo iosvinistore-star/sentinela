@@ -63,3 +63,9 @@ class EmpresaRepositorio(RepositorioBase):
         """(status, agentes_endpoint_habilitado) ou None."""
         stmt = select(Empresa.status, Empresa.agentes_endpoint_habilitado).where(Empresa.id == empresa_id)
         return (await self.sessao.execute(stmt)).one_or_none()
+
+    async def buscar_nome_por_cnpj(self, cnpj: str, exceto_id=None) -> str | None:
+        stmt = select(Empresa.nome).where(Empresa.cnpj == cnpj)
+        if exceto_id is not None:
+            stmt = stmt.where(Empresa.id != exceto_id)
+        return (await self.sessao.execute(stmt)).scalars().first()

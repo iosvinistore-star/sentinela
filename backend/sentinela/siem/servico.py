@@ -151,9 +151,9 @@ class SIEMBatcher:
       nunca era detectado. Contadores ``descartados``/``falhas`` expostos.
     """
 
-    def __init__(self, pool, batch_size: int = 500, flush_interval: float = 0.100, max_queue: int = 20000,
+    def __init__(self, db, batch_size: int = 500, flush_interval: float = 0.100, max_queue: int = 20000,
                  correlacionar: bool = True):
-        self.pool = pool
+        self.db = db
         self.batch_size = max(1, batch_size)
         self.flush_interval = max(0.01, flush_interval)
         self.queue: asyncio.Queue[tuple[str, dict[str, Any], str | None]] | None = None
@@ -217,7 +217,7 @@ class SIEMBatcher:
             return
         tenant, agente_id = key
         try:
-            async with self.pool.tenant_session(tenant) as sessao:
+            async with self.db.tenant_session(tenant) as sessao:
                 ids = await persistir_eventos_com_ids(sessao, tenant, eventos, agente_id)
                 if self.correlacionar:
                     from sentinela.siem.correlacao_siem import correlacionar_lote

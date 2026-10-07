@@ -8,7 +8,7 @@ Regras de negócio de licenciamento (planos, licenças, ocupação de vagas de
 endpoint) -- ver ARQUITETURA_LICENCIAMENTO.md para o desenho completo.
 
 Convenção seguida do resto de services/*.py: toda função recebe uma conexão
-JÁ escopada (tenant_scoped_connection ou superadmin_scoped_connection,
+JÁ escopada (Database.tenant_session ou Database.superadmin_session,
 dependendo da rota) -- nunca abre conexão própria. Ações administrativas
 chamam `services/auditoria.py:registrar_evento` na MESMA transação (atômico
 com a ação); validações de alta frequência do Agent gravam em
@@ -282,3 +282,9 @@ async def liberar_endpoint(sessao, empresa_id, agente_id):
         return None
     await _registrar_evento_licenca(sessao, empresa_id, vaga.licenca_id, "licenca.endpoint_liberado", {"agente_id": str(agente_id)})
     return _publico_vaga(vaga)
+
+
+async def obter_empresa_da_licenca(sessao, licenca_id):
+    """`empresa_id` dono da licença, ou None se não existir (precisa de sessão superadmin: cruza tenants)."""
+    licenca = await LicencaRepositorio(sessao).obter(licenca_id)
+    return licenca.empresa_id if licenca else None

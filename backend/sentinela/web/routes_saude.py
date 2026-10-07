@@ -51,14 +51,14 @@ async def liveness():
 
 @router.get("/ready")
 async def readiness(request: Request):
-    pool = getattr(request.app.state, "pool", None)
-    if pool is None:
+    db = getattr(request.app.state, "db", None)
+    if db is None:
         # Lifespan ainda não terminou de criar o pool (só deveria acontecer
         # numa janela minúscula logo no boot) -- "não pronto" é a resposta
         # correta, não um erro.
         return JSONResponse(status_code=503, content={"status": "not_ready", "detail": "pool de conexões ainda não inicializado"})
     try:
-        await asyncio.wait_for(pool.ping(), timeout=TIMEOUT_CHECAGEM_BANCO_SEGUNDOS)
+        await asyncio.wait_for(db.ping(), timeout=TIMEOUT_CHECAGEM_BANCO_SEGUNDOS)
     except Exception as exc:
         return JSONResponse(
             status_code=503,

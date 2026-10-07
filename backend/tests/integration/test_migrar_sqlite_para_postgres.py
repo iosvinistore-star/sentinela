@@ -16,7 +16,7 @@ import uuid
 import pytest
 
 from scripts.migrar_sqlite_para_postgres import contar_origem, migrar
-from sentinela.db.pool import tenant_scoped_connection
+from tests.sql_cru import buscar, executar, valor
 
 pytestmark = pytest.mark.integration
 
@@ -96,7 +96,7 @@ async def test_dry_run_nao_escreve_nada(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_migracao_live_cria_empresa_admin_e_dados(tmp_path, pool, empresa_factory, monkeypatch):
+async def test_migracao_live_cria_empresa_admin_e_dados(tmp_path, db, empresa_factory, monkeypatch):
     from tests.integration.conftest_db import TEST_DATABASE_URL_ADMIN
 
     sqlite_path = tmp_path / "sentinela.db"
@@ -124,27 +124,25 @@ async def test_migracao_live_cria_empresa_admin_e_dados(tmp_path, pool, empresa_
     assert resultado["inseridos"]["auditoria"] == 1
     assert resultado["validacao"]["passou"] is True
 
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
-        incidentes = await conn.fetch("SELECT incident_id, severidade FROM incidentes ORDER BY incident_id")
-        usuarios = await conn.fetch("SELECT email, papel FROM usuarios")
+    async with db.tenant_session(empresa_id) as conn:
+        incidentes = await buscar(conn, "SELECT incident_id, severidade FROM incidentes ORDER BY incident_id")
+        usuarios = await buscar(conn, "SELECT email, papel FROM usuarios")
 
     assert len(incidentes) == 2
     assert usuarios[0]["papel"] == "admin"
 
     # Cleanup manual (empresa_factory não sabe desta empresa, criada fora dela)
-    from sentinela.db.pool import superadmin_scoped_connection
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM bloqueios_firewall WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM incidentes WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM empresas WHERE id = $1", empresa_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM bloqueios_firewall WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM incidentes WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM empresas WHERE id = $1", empresa_id)
 
 
 @pytest.mark.asyncio
-async def test_migracao_e_idempotente_rerun_nao_duplica(tmp_path, pool):
+async def test_migracao_e_idempotente_rerun_nao_duplica(tmp_path, db):
     from tests.integration.conftest_db import TEST_DATABASE_URL_ADMIN
-    from sentinela.db.pool import superadmin_scoped_connection
 
     sqlite_path = tmp_path / "sentinela.db"
     _criar_sqlite_legado(sqlite_path)
@@ -166,9 +164,9 @@ async def test_migracao_e_idempotente_rerun_nao_duplica(tmp_path, pool):
     assert primeira["inseridos"]["incidentes"] == 2
     assert segunda["inseridos"]["incidentes"] == 0  # ON CONFLICT DO NOTHING -- rerun não duplica
 
-    async with superadmin_scoped_connection(pool) as conn:
-        total = await conn.fetchval("SELECT count(*) FROM incidentes WHERE empresa_id = $1", empresa_id)
+    async with db.superadmin_session() as conn:
+        total = await valor(conn, "SELECT count(*) FROM incidentes WHERE empresa_id = $1", empresa_id)
         assert total == 2
-        await conn.execute("DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM incidentes WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM empresas WHERE id = $1", empresa_id)
+        await executar(conn, "DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM incidentes WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM empresas WHERE id = $1", empresa_id)

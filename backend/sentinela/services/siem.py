@@ -7,10 +7,14 @@
 from sentinela.models import EdrTelemetria, SigmaAlerta, SiemCorrelacao, UebaAnomalia
 from sentinela.repositories.siem import (
     CorrelacaoRepositorio,
+    EdrRepositorio,
     EventoSiemRepositorio,
+    SiemAgenteFonteRepositorio,
     SiemFonteRepositorio,
     UebaRepositorio,
 )
+from sentinela.siem.correlacao_siem import correlacionar_lote
+from sentinela.siem.servico import persistir_eventos_com_ids
 from sentinela.siem.ueba import avaliar_lote
 
 
@@ -109,3 +113,27 @@ async def reavaliar_ueba(sessao, empresa_id, limite: int) -> dict:
         "entidades_anomalas": len(resultado),
         "anomalias_criadas": sum(1 for a in resultado.values() if a["nova"]),
     }
+
+
+# --- ingestão ----------------------------------------------------------------------------
+async def ingerir_eventos_do_agente(sessao, empresa_id: str, agente_id: str, normalizados: list[dict]) -> dict:
+    """Persiste o lote, correlaciona e contabiliza por tipo de fonte do agente."""
+    ids = await persistir_eventos_com_ids(sessao, empresa_id, normalizados, agente_id)
+    resultado = await correlacionar_lote(sessao, empresa_id, list(zip(ids, normalizados)))
+    por_tipo: dict[str, tuple] = {}
+    for ev in normalizados:
+        tipo = str(ev["source_type"])
+        ts, n = por_tipo.get(tipo, (ev["timestamp"], 0))
+        por_tipo[tipo] = (max(ts, ev["timestamp"]), n + 1)
+    await SiemAgenteFonteRepositorio(sessao).somar_lote(empresa_id, agente_id, por_tipo)
+    return resultado
+
+
+async def registrar_processos_suspeitos_edr(sessao, empresa_id, agente_id, hostname: str, processos: list[dict]) -> None:
+    """Preserva a telemetria de processos suspeitos do heartbeat, deduplicada por (agente, pid, processo) na última hora."""
+    repo = EdrRepositorio(sessao)
+    for proc in processos:
+        await repo.inserir_processo_suspeito_deduplicado(
+            empresa_id, agente_id, hostname, proc["nome"], proc["pid"], proc["usuario"],
+            {"linha_de_comando": proc["linha_de_comando"], "origem": "heartbeat"},
+        )

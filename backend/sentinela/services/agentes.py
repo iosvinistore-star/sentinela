@@ -7,7 +7,7 @@
 Sentinela Endpoint -- camada tenant-scoped para gestão de agentes locais e
 processamento de heartbeat. Segue a mesma convenção do resto de
 `services/*.py`: toda função aqui espera uma conexão JÁ tenant-scoped
-(`sentinela.db.pool.tenant_scoped_connection`) como primeiro argumento.
+(`Database.tenant_session`, de `sentinela.database`) como primeiro argumento.
 
 Geração/verificação do TOKEN em si (que precisa rodar ANTES de saber o
 tenant, no caso da autenticação) fica em `auth/agentes.py`, não aqui -- ver
@@ -189,8 +189,8 @@ async def criar_agente(sessao, empresa_id, hostname: str, ator_usuario_id=None):
     # `LimiteEndpointsExcedidoError`, se levantada por `registrar_endpoint`,
     # propaga daqui para fora sem ser capturada -- a transação inteira
     # (incluindo o INSERT do agente acima) é revertida pelo
-    # `tenant_scoped_connection` que envolve esta chamada (ver
-    # db/pool.py:tenant_scoped_connection), então nunca sobra um agente
+    # `Database.tenant_session` que envolve esta chamada (ver
+    # db/pool.py:Database.tenant_session), então nunca sobra um agente
     # "órfão" criado sem conseguir vaga; quem traduz isso para HTTP 409 é a
     # rota (api/v1/agentes.py:criar_agente).
     licenca_ativa_id = await LicencaRepositorio(sessao).obter_ativa_mais_recente(empresa_id)
