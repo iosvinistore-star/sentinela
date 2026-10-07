@@ -16,7 +16,7 @@ import re
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sentinela.database.sessao import Sessao
 
 _PARAM = re.compile(r"\$(\d+)(?:::([\w\[\]]+))?")
 # ":algo" solto (dentro de literais, ex. '{"a":1}') não pode virar bind do SQLAlchemy.
@@ -49,7 +49,7 @@ class Registro(dict):
     """Linha como dict (imita o `asyncpg.Record` no uso real do código)."""
 
 
-class SessaoComCompat(AsyncSession):
+class SessaoComCompat(Sessao):
     async def execute(self, statement, *args, **kwargs):
         if isinstance(statement, str):
             stmt, params = _traduzir(statement, args)
