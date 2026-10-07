@@ -1,0 +1,3 @@
+[run]
+# SQLAlchemy assincrono executa o ORM em greenlets: sem isso o coverage perde as linhas executadas depois do primeiro await ao banco.
+concurrency = greenlet,thread
