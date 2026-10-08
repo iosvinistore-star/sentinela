@@ -43,11 +43,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sentinela.auth.security import hash_senha  # noqa: E402
+from sentinela.database import Database, DatabaseSettings  # noqa: E402
+from sentinela.repositories.migracao_legado import MigracaoLegadoRepositorio  # noqa: E402
 
 EMPRESA_ID_LEGADA_PADRAO = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
@@ -138,7 +138,7 @@ def _mapear_incidente(linha_sqlite):
         "severidade": _severidade_valida(linha_sqlite["severity"]),
         "pontuacao_risco": linha_sqlite["risk_score"] or 0,
         "status": linha_sqlite["status"] or "OPEN",
-        "ataques": json.dumps(ataques, ensure_ascii=False),
+        "ataques": ataques,
         "observacoes": linha_sqlite["notes"] or "",
         "criado_em": _parse_datetime(linha_sqlite["created_at"]) or datetime.now(timezone.utc),
         "atualizado_em": _parse_datetime(linha_sqlite["updated_at"]) or datetime.now(timezone.utc),
@@ -200,63 +200,32 @@ async def migrar(
 
     admin_senha_hash = hash_senha(admin_senha)
 
-    conn = await asyncpg.connect(database_url_admin)
+    db = Database.conectar(DatabaseSettings(url=database_url_admin, pool_size=1, max_overflow=0))
     try:
-        async with conn.transaction():
-            await conn.execute(
-                "INSERT INTO empresas (id, nome, plano, status) VALUES ($1, $2, 'legado', 'ativa') "
-                "ON CONFLICT (id) DO NOTHING",
-                empresa_id, empresa_nome,
-            )
-            await conn.execute(
-                "INSERT INTO usuarios (empresa_id, email, papel, senha_hash) VALUES ($1, $2, 'admin', $3) "
-                "ON CONFLICT (email) DO NOTHING",
-                empresa_id, admin_email, admin_senha_hash,
-            )
+        async with db.superadmin_session() as sessao:
+            repo = MigracaoLegadoRepositorio(sessao)
+            await repo.garantir_empresa(empresa_id, empresa_nome)
+            await repo.garantir_admin(empresa_id, admin_email, admin_senha_hash)
 
             inseridos_incidentes = 0
             for linha in incidentes:
-                mapeado = _mapear_incidente(linha)
-                resultado = await conn.execute(
-                    """
-                    INSERT INTO incidentes
-                        (empresa_id, incident_id, ip, severidade, pontuacao_risco, status, ataques, observacoes, criado_em, atualizado_em)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::timestamptz, $10::timestamptz)
-                    ON CONFLICT (empresa_id, incident_id) DO NOTHING
-                    """,
-                    empresa_id, mapeado["incident_id"], mapeado["ip"], mapeado["severidade"],
-                    mapeado["pontuacao_risco"], mapeado["status"], mapeado["ataques"],
-                    mapeado["observacoes"], mapeado["criado_em"], mapeado["atualizado_em"],
-                )
-                if resultado.endswith(" 1"):
+                if await repo.inserir_incidente(empresa_id, _mapear_incidente(linha)):
                     inseridos_incidentes += 1
 
             inseridos_bloqueios = 0
             for ip, info in bloqueios.items():
-                resultado = await conn.execute(
-                    """
-                    INSERT INTO bloqueios_firewall (empresa_id, ip, motivo, origem, status, bloqueado_em, expira_em)
-                    VALUES ($1, $2, $3, $4, 'ativo', $5::timestamptz, $6::timestamptz)
-                    ON CONFLICT (empresa_id, ip) WHERE status = 'ativo' DO NOTHING
-                    """,
+                inserido = await repo.inserir_bloqueio(
                     empresa_id, ip, info.get("motivo", ""), info.get("origem", "migracao"),
                     _parse_datetime(info.get("bloqueado_em")) or datetime.now(timezone.utc),
                     _parse_datetime(info.get("expira_em")),
                 )
-                if resultado.endswith(" 1"):
+                if inserido:
                     inseridos_bloqueios += 1
 
             inseridos_auditoria = 0
             for evento in eventos_auditoria:
-                await conn.execute(
-                    """
-                    INSERT INTO auditoria (empresa_id, ator_usuario_id, acao, detalhes, criado_em)
-                    VALUES ($1, NULL, $2, $3::jsonb, COALESCE($4::timestamptz, now()))
-                    """,
-                    empresa_id,
-                    evento.get("acao", "evento_legado"),
-                    json.dumps(evento, ensure_ascii=False),
-                    _parse_datetime(evento.get("timestamp")),
+                await repo.inserir_auditoria(
+                    empresa_id, evento.get("acao", "evento_legado"), evento, _parse_datetime(evento.get("timestamp")),
                 )
                 inseridos_auditoria += 1
 
@@ -265,7 +234,8 @@ async def migrar(
             f"{inseridos_bloqueios} bloqueios ativos, {inseridos_auditoria} eventos de auditoria."
         )
 
-        validacao = await validar(conn, empresa_id, contagens_origem)
+        async with db.superadmin_session() as sessao:
+            validacao = await validar(sessao, empresa_id, contagens_origem)
         log(f"[migração] validação: {validacao}")
         return {
             "dry_run": False,
@@ -278,21 +248,18 @@ async def migrar(
             "validacao": validacao,
         }
     finally:
-        await conn.close()
+        await db.fechar()
 
 
-async def validar(conn, empresa_id, contagens_origem, tamanho_amostra=50):
+async def validar(sessao, empresa_id, contagens_origem, tamanho_amostra=50):
     """
     Compara contagens (origem vs. destino por empresa_id) + um hash de
     amostra sobre até `tamanho_amostra` incidentes aleatórios. Retorna um
     dict com 'passou': bool.
     """
-    contagem_incidentes_pg = await conn.fetchval(
-        "SELECT count(*) FROM incidentes WHERE empresa_id = $1", empresa_id
-    )
-    contagem_bloqueios_pg = await conn.fetchval(
-        "SELECT count(*) FROM bloqueios_firewall WHERE empresa_id = $1 AND status = 'ativo'", empresa_id
-    )
+    repo = MigracaoLegadoRepositorio(sessao)
+    contagem_incidentes_pg = await repo.contar_incidentes(empresa_id)
+    contagem_bloqueios_pg = await repo.contar_bloqueios_ativos(empresa_id)
 
     # Contagem pode ser MENOR que a origem se havia incident_id duplicado
     # (ON CONFLICT DO NOTHING) -- isso não é uma falha de migração, é uma
@@ -305,11 +272,7 @@ async def validar(conn, empresa_id, contagens_origem, tamanho_amostra=50):
         and contagem_bloqueios_pg <= max(contagens_origem["bloqueios_ativos"], contagem_bloqueios_pg)
     )
 
-    amostra = await conn.fetch(
-        "SELECT incident_id, ip, severidade, pontuacao_risco FROM incidentes "
-        "WHERE empresa_id = $1 ORDER BY random() LIMIT $2",
-        empresa_id, tamanho_amostra,
-    )
+    amostra = await repo.amostra_de_incidentes(empresa_id, tamanho_amostra)
     hash_amostra = hashlib.sha256(
         "|".join(f"{r['incident_id']}:{r['ip']}:{r['severidade']}:{r['pontuacao_risco']}" for r in amostra).encode()
     ).hexdigest()
@@ -346,14 +309,15 @@ async def _main_async():
         raise SystemExit("--database-url-admin (ou DATABASE_URL_ADMIN) é obrigatório")
 
     if args.validar_somente:
-        conn = await asyncpg.connect(args.database_url_admin)
+        db = Database.conectar(DatabaseSettings(url=args.database_url_admin, pool_size=1, max_overflow=0))
         try:
             contagens = contar_origem(args.sqlite_path, args.estado_firewall_path, args.auditoria_path)
-            resultado = await validar(conn, uuid.UUID(args.empresa_id), contagens)
+            async with db.superadmin_session() as sessao:
+                resultado = await validar(sessao, uuid.UUID(args.empresa_id), contagens)
             print(json.dumps(resultado, indent=2, ensure_ascii=False, default=str))
             raise SystemExit(0 if resultado["passou"] else 1)
         finally:
-            await conn.close()
+            await db.fechar()
 
     admin_senha = os.environ.get(args.admin_senha_env) if not args.dry_run else None
 

@@ -94,3 +94,11 @@ async def trocar_propria_senha(sessao, superadmin_id, senha_atual: str, senha_no
         return None
     senha_hash_nova = await asyncio.to_thread(hash_senha, senha_nova)
     return await repo.trocar_senha(superadmin_id, senha_hash_nova)
+
+
+async def existe_algum_superadmin(sessao) -> bool:
+    return await SuperadminRepositorio(sessao).existe_algum()
+
+
+async def travar_primeiro_acesso(sessao, chave: int) -> None:
+    await SuperadminRepositorio(sessao).travar_transacao(chave)

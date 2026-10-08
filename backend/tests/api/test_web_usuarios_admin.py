@@ -8,8 +8,8 @@
 import uuid
 
 import pytest
+from tests.sql_cru import buscar_um, executar
 
-from sentinela.db.pool import superadmin_scoped_connection
 
 pytestmark = pytest.mark.integration
 
@@ -50,7 +50,7 @@ async def test_admin_cria_usuario_duplicado_mostra_erro_inline(client, usuario_d
 
 
 @pytest.mark.asyncio
-async def test_superadmin_cria_empresa_e_usuario_via_htmx(client, superadmin_de_teste, pool):
+async def test_superadmin_cria_empresa_e_usuario_via_htmx(client, superadmin_de_teste, db):
     await client.post("/login", data={"email": superadmin_de_teste["email"], "senha": superadmin_de_teste["senha"]})
 
     resp_empresa = await client.post(
@@ -59,8 +59,8 @@ async def test_superadmin_cria_empresa_e_usuario_via_htmx(client, superadmin_de_
     assert resp_empresa.status_code == 200
     assert "Empresa Web Admin" in resp_empresa.text
 
-    async with superadmin_scoped_connection(pool) as conn:
-        row = await conn.fetchrow("SELECT id FROM empresas WHERE nome = 'Empresa Web Admin'")
+    async with db.superadmin_session() as conn:
+        row = await buscar_um(conn, "SELECT id FROM empresas WHERE nome = 'Empresa Web Admin'")
     empresa_id = str(row["id"])
 
     resp_pagina_usuarios = await client.get(f"/admin/empresas/{empresa_id}/usuarios")
@@ -75,14 +75,14 @@ async def test_superadmin_cria_empresa_e_usuario_via_htmx(client, superadmin_de_
     assert resp_criar.status_code == 200
     assert email_admin in resp_criar.text
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
-        await conn.execute("DELETE FROM empresas WHERE id = $1", empresa_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
+        await executar(conn, "DELETE FROM empresas WHERE id = $1", empresa_id)
 
 
 @pytest.mark.asyncio
-async def test_sessao_web_de_superadmin_revogada_redireciona_para_login(client, superadmin_de_teste, pool):
+async def test_sessao_web_de_superadmin_revogada_redireciona_para_login(client, superadmin_de_teste, db):
     """Espelha tests/api/test_admin_api.py::test_sessao_de_superadmin_revogada_...
     -- mesmo reforço (web/deps.py:conexao_superadmin_web), só que aqui o
     efeito observável é um redirect para /login (ver web/deps.py:SessaoInvalidaError)
@@ -92,9 +92,8 @@ async def test_sessao_web_de_superadmin_revogada_redireciona_para_login(client, 
     resp_antes = await client.get("/admin/empresas")
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "UPDATE superadmins SET token_version = token_version + 1 WHERE id = $1",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE superadmins SET token_version = token_version + 1 WHERE id = $1",
             superadmin_de_teste["id"],
         )
 

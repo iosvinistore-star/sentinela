@@ -7,7 +7,7 @@
 Sentinela Endpoint -- camada tenant-scoped para gestão de agentes locais e
 processamento de heartbeat. Segue a mesma convenção do resto de
 `services/*.py`: toda função aqui espera uma conexão JÁ tenant-scoped
-(`sentinela.db.pool.tenant_scoped_connection`) como primeiro argumento.
+(`Database.tenant_session`, de `sentinela.database`) como primeiro argumento.
 
 Geração/verificação do TOKEN em si (que precisa rodar ANTES de saber o
 tenant, no caso da autenticação) fica em `auth/agentes.py`, não aqui -- ver
@@ -20,10 +20,11 @@ já existe para ataques de rede), mas nunca aciona firewall nem qualquer
 resposta automática local -- isso fica para uma fase futura, deliberadamente
 fora do escopo agora.
 """
-import json
 
 from sentinela.auth.agentes import gerar_token
-from sentinela.auth.security import hash_senha
+from sentinela.auth.security import hash_token
+from sentinela.repositories.agentes import AgenteRepositorio
+from sentinela.repositories.licencas import LicencaRepositorio
 from sentinela.services import auditoria as servico_auditoria
 from sentinela.services import incidentes as servico_incidentes
 from sentinela.services import licenciamento as servico_licenciamento
@@ -111,10 +112,10 @@ def avaliar_risco_endpoint(processos_suspeitos: list[dict]) -> dict:
     return {"score": score, "severity": nivel}
 
 
-def _publico(row):
-    if row is None:
+def _publico(agente):
+    if agente is None:
         return None
-    d = dict(row)
+    d = agente.para_dict()
     d["id"] = str(d["id"])
     d["empresa_id"] = str(d["empresa_id"])
     if d.get("criado_por_usuario_id") is not None:
@@ -126,7 +127,7 @@ def _publico(row):
     return d
 
 
-async def criar_agente(conn, empresa_id, hostname: str, ator_usuario_id=None):
+async def criar_agente(sessao, empresa_id, hostname: str, ator_usuario_id=None):
     """
     Retorna (agente_publico, token_completo). `token_completo` só existe
     neste retorno -- não é recuperável depois (nem por este serviço, nem
@@ -149,20 +150,14 @@ async def criar_agente(conn, empresa_id, hostname: str, ator_usuario_id=None):
     coluna na migration 0016), o predicado sempre bate para um INSERT.
     """
     token_completo, prefixo = gerar_token()
-    token_hash = hash_senha(token_completo)
-    row = await conn.fetchrow(
-        """
-        INSERT INTO agentes (empresa_id, hostname, token_prefixo, token_hash, criado_por_usuario_id)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (empresa_id, hostname) WHERE status = 'ativo' DO NOTHING
-        RETURNING *
-        """,
-        empresa_id, hostname, prefixo, token_hash, ator_usuario_id,
+    token_hash = hash_token(token_completo)
+    row = await AgenteRepositorio(sessao).inserir_se_hostname_livre(
+        empresa_id, hostname, prefixo, token_hash, ator_usuario_id
     )
     if row is None:
         return None, None
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "agente.criado", {"hostname": hostname, "agente_id": str(row["id"])},
+        sessao, empresa_id, "agente.criado", {"hostname": hostname, "agente_id": str(row.id)},
         ator_usuario_id=ator_usuario_id,
     )
 
@@ -193,31 +188,26 @@ async def criar_agente(conn, empresa_id, hostname: str, ator_usuario_id=None):
     # `LimiteEndpointsExcedidoError`, se levantada por `registrar_endpoint`,
     # propaga daqui para fora sem ser capturada -- a transação inteira
     # (incluindo o INSERT do agente acima) é revertida pelo
-    # `tenant_scoped_connection` que envolve esta chamada (ver
-    # db/pool.py:tenant_scoped_connection), então nunca sobra um agente
+    # `Database.tenant_session` que envolve esta chamada (ver
+    # db/pool.py:Database.tenant_session), então nunca sobra um agente
     # "órfão" criado sem conseguir vaga; quem traduz isso para HTTP 409 é a
     # rota (api/v1/agentes.py:criar_agente).
-    licenca_ativa = await conn.fetchrow(
-        "SELECT id FROM licencas WHERE empresa_id = $1 AND status = 'ativa' ORDER BY criado_em DESC LIMIT 1",
-        empresa_id,
-    )
-    if licenca_ativa is not None:
-        await servico_licenciamento.registrar_endpoint(conn, empresa_id, licenca_ativa["id"], row["id"])
+    licenca_ativa_id = await LicencaRepositorio(sessao).obter_ativa_mais_recente(empresa_id)
+    if licenca_ativa_id is not None:
+        await servico_licenciamento.registrar_endpoint(sessao, empresa_id, licenca_ativa_id, row.id)
 
     return _publico(row), token_completo
 
 
-async def listar_agentes(conn):
-    rows = await conn.fetch("SELECT * FROM agentes ORDER BY criado_em DESC")
-    return [_publico(r) for r in rows]
+async def listar_agentes(sessao):
+    return [_publico(a) for a in await AgenteRepositorio(sessao).listar()]
 
 
-async def obter_agente(conn, agente_id):
-    row = await conn.fetchrow("SELECT * FROM agentes WHERE id = $1", agente_id)
-    return _publico(row)
+async def obter_agente(sessao, agente_id):
+    return _publico(await AgenteRepositorio(sessao).obter(agente_id))
 
 
-async def revogar_agente(conn, empresa_id, agente_id, ator_usuario_id=None):
+async def revogar_agente(sessao, empresa_id, agente_id, ator_usuario_id=None):
     """
     Revoga (nunca apaga a linha -- preserva o histórico de que este agente
     existiu e o que reportou, mesmo espírito de `ips_protegidos`/sessão de
@@ -267,18 +257,15 @@ async def revogar_agente(conn, empresa_id, agente_id, ator_usuario_id=None):
     aceitar heartbeat na hora, mas continuam existindo como linhas
     'ativo').
     """
-    row = await conn.fetchrow(
-        "UPDATE agentes SET status = 'revogado' WHERE id = $1 AND empresa_id = $2 RETURNING *",
-        agente_id, empresa_id,
-    )
+    row = await AgenteRepositorio(sessao).revogar(empresa_id, agente_id)
     if row is None:
         return None
-    vaga_liberada = await servico_licenciamento.liberar_endpoint(conn, empresa_id, agente_id)
+    vaga_liberada = await servico_licenciamento.liberar_endpoint(sessao, empresa_id, agente_id)
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "agente.revogado",
+        sessao, empresa_id, "agente.revogado",
         {
             "agente_id": str(agente_id),
-            "hostname": row["hostname"],
+            "hostname": row.hostname,
             "vaga_endpoint_liberada": vaga_liberada is not None,
         },
         ator_usuario_id=ator_usuario_id,
@@ -328,7 +315,7 @@ class AgenteHostnameDivergenteError(Exception):
 
 
 async def registrar_heartbeat(
-    conn,
+    sessao,
     empresa_id,
     agente_id,
     hostname: str,
@@ -377,10 +364,11 @@ async def registrar_heartbeat(
     suspeito foi reportado. Levanta `AgenteHostnameDivergenteError` se o
     hostname não bater.
     """
-    hostname_registrado = await conn.fetchval("SELECT hostname FROM agentes WHERE id = $1", agente_id)
+    repo = AgenteRepositorio(sessao)
+    hostname_registrado = await repo.obter_hostname(agente_id)
     if hostname_registrado is not None and not _hostnames_equivalentes(hostname_registrado, hostname):
         await servico_auditoria.registrar_evento(
-            conn, empresa_id, "agente.heartbeat_hostname_divergente",
+            sessao, empresa_id, "agente.heartbeat_hostname_divergente",
             {
                 "agente_id": str(agente_id),
                 "hostname_registrado": hostname_registrado,
@@ -390,28 +378,14 @@ async def registrar_heartbeat(
         )
         raise AgenteHostnameDivergenteError(hostname_registrado, hostname)
 
-    await conn.execute(
-        """
-        UPDATE agentes
-        SET ultimo_heartbeat_em = now(), sistema_operacional = $2, versao_agente = $3
-        WHERE id = $1
-        """,
-        agente_id, sistema_operacional, versao_agente,
-    )
-    await conn.execute(
-        """
-        INSERT INTO agentes_eventos (empresa_id, agente_id, tipo, payload)
-        VALUES ($1, $2, $3, $4::jsonb)
-        """,
+    await repo.registrar_heartbeat(agente_id, sistema_operacional, versao_agente)
+    await repo.registrar_evento(
         empresa_id, agente_id, "heartbeat",
-        json.dumps(
-            {
-                "hostname": hostname,
-                "total_processos": total_processos,
-                "processos_suspeitos": processos_suspeitos,
-            },
-            ensure_ascii=False,
-        ),
+        {
+            "hostname": hostname,
+            "total_processos": total_processos,
+            "processos_suspeitos": processos_suspeitos,
+        },
     )
 
     if not processos_suspeitos:
@@ -437,10 +411,10 @@ async def registrar_heartbeat(
     # ele (nunca abaixa severidade/score, só escala) em vez de abrir um
     # incidente paralelo; só abre um novo se não houver nenhum aberto
     # (primeira detecção, ou o anterior já foi RESOLVIDO/FALSO_POSITIVO).
-    incidente_aberto = await servico_incidentes.obter_incidente_endpoint_aberto(conn, empresa_id, agente_id)
+    incidente_aberto = await servico_incidentes.obter_incidente_endpoint_aberto(sessao, empresa_id, agente_id)
     if incidente_aberto is not None:
         incidente = await servico_incidentes.acrescentar_deteccoes(
-            conn, empresa_id, incidente_aberto["incident_id"], risco, ataques,
+            sessao, empresa_id, incidente_aberto["incident_id"], risco, ataques,
         )
     else:
         # Bandit sinaliza B104 aqui: interpreta o literal abaixo como um
@@ -451,23 +425,22 @@ async def registrar_heartbeat(
         # HeartbeatRequest.ip_local em api/v1/agentes.py) -- nenhum socket
         # é aberto/escutado neste ponto. Suprimido inline abaixo.
         incidente = await servico_incidentes.criar_incidente(
-            conn, empresa_id, ip_local or "0.0.0.0", risco, ataques, origem="endpoint", agente_id=agente_id,  # nosec B104
+            sessao, empresa_id, ip_local or "0.0.0.0", risco, ataques, origem="endpoint", agente_id=agente_id,  # nosec B104
         )
     if incidente is not None:
-        await conn.execute(
-            """
-            INSERT INTO agentes_eventos (empresa_id, agente_id, tipo, payload)
-            VALUES ($1, $2, 'processo_suspeito', $3::jsonb)
-            """,
-            empresa_id, agente_id,
-            json.dumps({"incidente_id": incidente["incident_id"], "ataques": ataques}, ensure_ascii=False),
+        await repo.registrar_evento(
+            empresa_id, agente_id, "processo_suspeito",
+            {"incidente_id": incidente["incident_id"], "ataques": ataques},
         )
     return incidente
 
 
-async def definir_habilitado(conn, empresa_id, agente_id, habilitado: bool, ator_usuario_id=None):
-    row = await conn.fetchrow("UPDATE agentes SET habilitado = $3 WHERE id = $1 AND empresa_id = $2 RETURNING id, empresa_id, hostname, status, habilitado", agente_id, empresa_id, habilitado)
+async def definir_habilitado(sessao, empresa_id, agente_id, habilitado: bool, ator_usuario_id=None):
+    row = await AgenteRepositorio(sessao).definir_habilitado(empresa_id, agente_id, habilitado)
     if row is None:
         return None
-    await servico_auditoria.registrar_evento(conn, empresa_id, "AGENT_ENABLED" if habilitado else "AGENT_DISABLED", {"agente_id": str(agente_id)}, ator_usuario_id=ator_usuario_id)
+    await servico_auditoria.registrar_evento(
+        sessao, empresa_id, "AGENT_ENABLED" if habilitado else "AGENT_DISABLED", {"agente_id": str(agente_id)},
+        ator_usuario_id=ator_usuario_id,
+    )
     return _publico(row)

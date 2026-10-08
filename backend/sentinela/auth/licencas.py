@@ -15,7 +15,7 @@ serem conceitos distintos mesmo tendo a mesma forma de token.
 Mesmo problema de "ovo e galinha" do login/agentes: RLS em `licencas` exige
 um tenant já setado, mas no momento em que só temos o token ainda não
 sabemos a empresa. Resolvido do mesmo jeito -- uma busca via
-`superadmin_scoped_connection` (BYPASSRLS), indexada pelo PREFIXO do token
+`Database.superadmin_session` (BYPASSRLS), indexada pelo PREFIXO do token
 (não pelo token inteiro, que só existe em hash).
 
 Formato do token: "lic_<prefixo 12 hex>_<segredo 43 chars url-safe>". Gerado
@@ -24,13 +24,14 @@ por `gerar_token()`; só o hash bcrypt do token INTEIRO fica no banco
 (`licencas.token_prefixo`, UNIQUE, indexado) só para tornar o lookup O(1) em
 vez de rodar bcrypt.checkpw contra TODA licença cadastrada a cada validação.
 """
-import asyncio
+import logging
 import secrets
 
 import bcrypt
 
-from sentinela.auth.security import verificar_senha
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.auth.cache_token import cache_tokens
+from sentinela.auth.security import hash_token, hash_token_e_rapido
+from sentinela.repositories.licencas import LicencaRepositorio
 
 PREFIXO_TOKEN = "lic"
 TAMANHO_PREFIXO_HEX = 12
@@ -64,7 +65,7 @@ def extrair_prefixo(token: str) -> str | None:
     return prefixo
 
 
-async def autenticar_licenca(pool, token: str) -> dict | None:
+async def autenticar_licenca(db, token: str) -> dict | None:
     """
     Retorna {"licenca_id", "empresa_id", "plano_id", "status", "expira_em"}
     se o token bater com uma licença existente (de QUALQUER status -- quem
@@ -76,26 +77,36 @@ async def autenticar_licenca(pool, token: str) -> dict | None:
     o HTTPException (mesmo padrão de auth/agentes.py:autenticar_agente).
     """
     prefixo = extrair_prefixo(token or "")
-    async with superadmin_scoped_connection(pool) as conn:
-        licenca = None
-        if prefixo is not None:
-            licenca = await conn.fetchrow(
-                """
-                SELECT id, empresa_id, plano_id, status, expira_em, token_hash
-                FROM licencas
-                WHERE token_prefixo = $1
-                """,
-                prefixo,
-            )
-        token_valido = await asyncio.to_thread(
-            verificar_senha, token, licenca["token_hash"] if licenca else _HASH_DUMMY
-        )
-        if licenca and token_valido:
-            return {
-                "licenca_id": licenca["id"],
-                "empresa_id": licenca["empresa_id"],
-                "plano_id": licenca["plano_id"],
-                "status": licenca["status"],
-                "expira_em": licenca["expira_em"],
-            }
+    # A consulta (barata) roda e a sessão é devolvida ao pool ANTES do bcrypt:
+    # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
+    licenca = None
+    if prefixo is not None:
+        async with db.superadmin_session() as sessao:
+            licenca = await LicencaRepositorio(sessao).buscar_por_prefixo(prefixo)
+    # `cache_tokens` evita o bcrypt quando este MESMO token já foi verificado contra o MESMO hash que está no banco
+    # agora (ver auth/cache_token.py); um token revogado nem chega aqui, porque a linha deixa de ser encontrada.
+    token_valido = await cache_tokens.verificar(token, licenca["token_hash"] if licenca else _HASH_DUMMY)
+    if licenca and token_valido and not hash_token_e_rapido(licenca["token_hash"]):
+        await _migrar_para_hash_rapido(db, licenca["id"], token)
+    if licenca and token_valido:
+        return {
+            "licenca_id": licenca["id"],
+            "empresa_id": licenca["empresa_id"],
+            "plano_id": licenca["plano_id"],
+            "status": licenca["status"],
+            "expira_em": licenca["expira_em"],
+        }
     return None
+
+
+async def _migrar_para_hash_rapido(db, licenca_id, token: str) -> None:
+    """
+    Token emitido antes do hash rápido (bcrypt): na primeira verificação bem-sucedida troca o hash guardado por
+    `sha256$...` (ver `auth.security.hash_token`), e os heartbeats seguintes deixam de pagar bcrypt. Melhor esforço:
+    falhar aqui nunca derruba a autenticação.
+    """
+    try:
+        async with db.superadmin_session() as sessao:
+            await LicencaRepositorio(sessao).atualizar_token_hash(licenca_id, hash_token(token))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("não foi possível migrar o hash do token", exc_info=True)

@@ -15,21 +15,20 @@ import datetime
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
 from sentinela.services import automacao as servico
 from sentinela.services import incidentes as servico_incidentes
 from sentinela.services import usuarios as servico_usuarios
+from tests.sql_cru import buscar_um, executar, valor
 
 pytestmark = pytest.mark.integration
 
 _AGORA = datetime.datetime.now(datetime.timezone.utc)
 
 
-async def _configurar_empresa(pool, empresa_id, *, modo_firewall="automacao_controlada",
+async def _configurar_empresa(db, empresa_id, *, modo_firewall="automacao_controlada",
                                 modo_firewall_auto=False, auto_triagem_incidentes=False):
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "UPDATE empresas SET modo_firewall=$2, modo_firewall_auto=$3, auto_triagem_incidentes=$4 WHERE id=$1",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE empresas SET modo_firewall=$2, modo_firewall_auto=$3, auto_triagem_incidentes=$4 WHERE id=$1",
             empresa_id, modo_firewall, modo_firewall_auto, auto_triagem_incidentes,
         )
 
@@ -43,9 +42,8 @@ async def _criar_incidente_com_bloqueio(conn, empresa_id, ip, *, falso_positivo=
         conn, empresa_id, ip, {"severity": "HIGH", "score": 70}, ["Scanner de Vulnerabilidades"],
     )
     if falso_positivo:
-        await conn.execute("UPDATE incidentes SET status = 'FALSO_POSITIVO' WHERE id = $1", incidente["id"])
-    await conn.execute(
-        """
+        await executar(conn, "UPDATE incidentes SET status = 'FALSO_POSITIVO' WHERE id = $1", incidente["id"])
+    await executar(conn, """
         INSERT INTO bloqueios_firewall (empresa_id, ip, motivo, origem, status, bloqueado_em, removido_em, incidente_id)
         VALUES ($1, $2::inet, 'teste', 'teste', $3, $4, $5, $6)
         """,
@@ -59,33 +57,33 @@ async def _criar_incidente_com_bloqueio(conn, empresa_id, ip, *, falso_positivo=
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_noop_quando_flag_desligada(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_noop_quando_flag_desligada(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Autonomia Flag Off")
-    await _configurar_empresa(pool, empresa_id, modo_firewall_auto=False)
+    await _configurar_empresa(db, empresa_id, modo_firewall_auto=False)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         resultado = await servico.avaliar_e_ajustar_modo_firewall(conn, empresa_id)
     assert resultado is None
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_noop_sem_amostras(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_noop_sem_amostras(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Autonomia Sem Amostras")
-    await _configurar_empresa(pool, empresa_id, modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         resultado = await servico.avaliar_e_ajustar_modo_firewall(conn, empresa_id)
     assert resultado is None
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_nao_mexe_em_observacao_ou_dry_run(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_nao_mexe_em_observacao_ou_dry_run(db, empresa_factory):
     """Escolha deliberada do tenant -- o autoajuste nunca tira o tenant de
     observacao/dry_run, mesmo com a flag ligada e amostras perfeitas."""
     empresa_id = await empresa_factory("Empresa Autonomia Modo Fora Da Escada")
-    await _configurar_empresa(pool, empresa_id, modo_firewall="observacao", modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall="observacao", modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for i in range(20):
             await _criar_incidente_com_bloqueio(
                 conn, empresa_id, f"203.0.{i}.1", bloqueado_em=_AGORA - datetime.timedelta(hours=i),
@@ -95,11 +93,11 @@ async def test_avaliar_e_ajustar_modo_firewall_nao_mexe_em_observacao_ou_dry_run
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_promove_com_taxa_de_problema_baixa(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_promove_com_taxa_de_problema_baixa(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Autonomia Promove")
-    await _configurar_empresa(pool, empresa_id, modo_firewall="manual", modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall="manual", modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for i in range(20):
             # só a amostra 0 é "problema" -- 1/20 = 5%, exatamente no teto
             # de promoção (<= 5%).
@@ -108,25 +106,24 @@ async def test_avaliar_e_ajustar_modo_firewall_promove_com_taxa_de_problema_baix
                 bloqueado_em=_AGORA - datetime.timedelta(hours=i),
             )
         resultado = await servico.avaliar_e_ajustar_modo_firewall(conn, empresa_id)
-        modo_no_banco = await conn.fetchval("SELECT modo_firewall FROM empresas WHERE id = $1", empresa_id)
+        modo_no_banco = await valor(conn, "SELECT modo_firewall FROM empresas WHERE id = $1", empresa_id)
 
     assert resultado == {"modo_anterior": "manual", "modo_novo": "automacao_controlada", "motivo": "taxa_de_problema_baixa"}
     assert modo_no_banco == "automacao_controlada"
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_grava_evento_de_auditoria_sem_ator_humano(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_grava_evento_de_auditoria_sem_ator_humano(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Autonomia Auditoria")
-    await _configurar_empresa(pool, empresa_id, modo_firewall="manual", modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall="manual", modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for i in range(20):
             await _criar_incidente_com_bloqueio(
                 conn, empresa_id, f"203.0.{i}.2", bloqueado_em=_AGORA - datetime.timedelta(hours=i),
             )
         await servico.avaliar_e_ajustar_modo_firewall(conn, empresa_id)
-        evento = await conn.fetchrow(
-            "SELECT * FROM auditoria WHERE empresa_id = $1 AND acao = 'firewall.modo_ajustado_automaticamente'",
+        evento = await buscar_um(conn, "SELECT * FROM auditoria WHERE empresa_id = $1 AND acao = 'firewall.modo_ajustado_automaticamente'",
             empresa_id,
         )
     assert evento is not None
@@ -135,11 +132,11 @@ async def test_avaliar_e_ajustar_modo_firewall_grava_evento_de_auditoria_sem_ato
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_rebaixa_com_taxa_de_problema_alta(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_rebaixa_com_taxa_de_problema_alta(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Autonomia Rebaixa")
-    await _configurar_empresa(pool, empresa_id, modo_firewall="automacao_controlada", modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall="automacao_controlada", modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for i in range(20):
             # 4/20 = 20% > 15% -- rebaixa.
             await _criar_incidente_com_bloqueio(
@@ -152,14 +149,14 @@ async def test_avaliar_e_ajustar_modo_firewall_rebaixa_com_taxa_de_problema_alta
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_freio_de_emergencia_no_topo_da_escada(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_freio_de_emergencia_no_topo_da_escada(db, empresa_factory):
     """Já em automacao_total (topo da escada), um único problema entre as
     últimas 5 amostras derruba um degrau imediatamente -- não espera
     acumular a taxa de 15% do rebaixamento normal."""
     empresa_id = await empresa_factory("Empresa Autonomia Freio Emergencia")
-    await _configurar_empresa(pool, empresa_id, modo_firewall="automacao_total", modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall="automacao_total", modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for i in range(5):
             await _criar_incidente_com_bloqueio(
                 conn, empresa_id, f"203.0.{i}.4", falso_positivo=(i == 2),
@@ -171,13 +168,13 @@ async def test_avaliar_e_ajustar_modo_firewall_freio_de_emergencia_no_topo_da_es
 
 
 @pytest.mark.asyncio
-async def test_avaliar_e_ajustar_modo_firewall_reversao_rapida_conta_como_problema(pool, empresa_factory):
+async def test_avaliar_e_ajustar_modo_firewall_reversao_rapida_conta_como_problema(db, empresa_factory):
     """Um bloqueio revertido em menos de 2h (mesmo sem o incidente virar
     FALSO_POSITIVO) já conta como problema para o autoajuste."""
     empresa_id = await empresa_factory("Empresa Autonomia Reversao Rapida")
-    await _configurar_empresa(pool, empresa_id, modo_firewall="automacao_controlada", modo_firewall_auto=True)
+    await _configurar_empresa(db, empresa_id, modo_firewall="automacao_controlada", modo_firewall_auto=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for i in range(20):
             bloqueado_em = _AGORA - datetime.timedelta(hours=i + 3)
             # as primeiras 4 amostras foram revertidas 30min depois de
@@ -201,13 +198,11 @@ async def _criar_incidente_parado(conn, empresa_id, ip, severidade, *, contido=F
         conn, empresa_id, ip, {"severity": severidade, "score": 70}, ["Scanner de Vulnerabilidades"], origem=origem,
     )
     parado_desde = _AGORA - datetime.timedelta(hours=servico._HORAS_INCIDENTE_PARADO + 1)
-    await conn.execute(
-        "UPDATE incidentes SET atualizado_em = $2, em_andamento_por_usuario_id = $3 WHERE id = $1",
+    await executar(conn, "UPDATE incidentes SET atualizado_em = $2, em_andamento_por_usuario_id = $3 WHERE id = $1",
         incidente["id"], parado_desde, em_andamento_por,
     )
     if contido:
-        await conn.execute(
-            """
+        await executar(conn, """
             INSERT INTO bloqueios_firewall (empresa_id, ip, motivo, origem, status, bloqueado_em, incidente_id)
             VALUES ($1, $2::inet, 'teste', 'teste', 'ativo', now(), $3)
             """,
@@ -217,25 +212,25 @@ async def _criar_incidente_parado(conn, empresa_id, ip, severidade, *, contido=F
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_noop_quando_flag_desligada(pool, empresa_factory):
+async def test_auto_classificar_noop_quando_flag_desligada(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Triagem Flag Off")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=False)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=False)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         await _criar_incidente_parado(conn, empresa_id, "203.0.114.1", "LOW")
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
     assert resultado == []
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_resolve_incidente_contido(pool, empresa_factory):
+async def test_auto_classificar_resolve_incidente_contido(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Triagem Contido")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         incidente = await _criar_incidente_parado(conn, empresa_id, "203.0.114.2", "CRITICAL", contido=True)
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
-        linha = await conn.fetchrow("SELECT status, resolvido_por FROM incidentes WHERE id = $1", incidente["id"])
+        linha = await buscar_um(conn, "SELECT status, resolvido_por FROM incidentes WHERE id = $1", incidente["id"])
 
     assert resultado == [{"incident_id": incidente["incident_id"], "status_novo": "RESOLVIDO"}]
     assert linha["status"] == "RESOLVIDO"
@@ -243,14 +238,14 @@ async def test_auto_classificar_resolve_incidente_contido(pool, empresa_factory)
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_marca_falso_positivo_quando_baixo_risco_e_sem_contencao(pool, empresa_factory):
+async def test_auto_classificar_marca_falso_positivo_quando_baixo_risco_e_sem_contencao(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Triagem Falso Positivo")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         incidente = await _criar_incidente_parado(conn, empresa_id, "203.0.114.3", "MEDIUM", contido=False)
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
-        linha = await conn.fetchrow("SELECT status, resolvido_por FROM incidentes WHERE id = $1", incidente["id"])
+        linha = await buscar_um(conn, "SELECT status, resolvido_por FROM incidentes WHERE id = $1", incidente["id"])
 
     assert resultado == [{"incident_id": incidente["incident_id"], "status_novo": "FALSO_POSITIVO"}]
     assert linha["status"] == "FALSO_POSITIVO"
@@ -258,7 +253,7 @@ async def test_auto_classificar_marca_falso_positivo_quando_baixo_risco_e_sem_co
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_nunca_marca_incidente_de_endpoint_como_falso_positivo(pool, empresa_factory):
+async def test_auto_classificar_nunca_marca_incidente_de_endpoint_como_falso_positivo(db, empresa_factory):
     """
     Este é O bug encontrado em revisão crítica (2026-09), a interação
     perigosa entre duas capacidades testadas isoladamente até então:
@@ -275,62 +270,62 @@ async def test_auto_classificar_nunca_marca_incidente_de_endpoint_como_falso_pos
     igual HIGH/CRITICAL sem contenção -- nunca vira FALSO_POSITIVO sozinho.
     """
     empresa_id = await empresa_factory("Empresa Triagem Endpoint Nunca Falso Positivo")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         incidente = await _criar_incidente_parado(
             conn, empresa_id, "203.0.114.20", "MEDIUM", contido=False, origem="endpoint",
         )
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
-        linha = await conn.fetchrow("SELECT status FROM incidentes WHERE id = $1", incidente["id"])
+        linha = await buscar_um(conn, "SELECT status FROM incidentes WHERE id = $1", incidente["id"])
 
     assert resultado == []
     assert linha["status"] == "OPEN"
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_ainda_resolve_incidente_de_endpoint_se_contido(pool, empresa_factory):
+async def test_auto_classificar_ainda_resolve_incidente_de_endpoint_se_contido(db, empresa_factory):
     """Não é uma regra especial "endpoint nunca muda de status" -- é
     especificamente "endpoint nunca vira FALSO_POSITIVO sozinho". Se um dia
     existir contenção real para endpoint (fora do escopo desta fase) e o
     incidente estiver marcado como contido, a auto-triagem continua
     resolvendo normalmente, mesma regra de origem='rede'."""
     empresa_id = await empresa_factory("Empresa Triagem Endpoint Contido")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         incidente = await _criar_incidente_parado(
             conn, empresa_id, "203.0.114.21", "CRITICAL", contido=True, origem="endpoint",
         )
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
-        linha = await conn.fetchrow("SELECT status FROM incidentes WHERE id = $1", incidente["id"])
+        linha = await buscar_um(conn, "SELECT status FROM incidentes WHERE id = $1", incidente["id"])
 
     assert resultado == [{"incident_id": incidente["incident_id"], "status_novo": "RESOLVIDO"}]
     assert linha["status"] == "RESOLVIDO"
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_nunca_mexe_em_high_critical_sem_contencao(pool, empresa_factory):
+async def test_auto_classificar_nunca_mexe_em_high_critical_sem_contencao(db, empresa_factory):
     """O critério conservador: HIGH/CRITICAL sem bloqueio ativo fica para
     um humano decidir, não importa há quanto tempo esteja parado."""
     empresa_id = await empresa_factory("Empresa Triagem Alto Risco Sem Contencao")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         incidente = await _criar_incidente_parado(conn, empresa_id, "203.0.114.4", "CRITICAL", contido=False)
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
-        linha = await conn.fetchrow("SELECT status FROM incidentes WHERE id = $1", incidente["id"])
+        linha = await buscar_um(conn, "SELECT status FROM incidentes WHERE id = $1", incidente["id"])
 
     assert resultado == []
     assert linha["status"] == "OPEN"
 
 
 @pytest.mark.asyncio
-async def test_auto_classificar_ignora_incidente_ja_tocado_por_humano(pool, empresa_factory):
+async def test_auto_classificar_ignora_incidente_ja_tocado_por_humano(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Triagem Tocado Por Humano")
-    await _configurar_empresa(pool, empresa_id, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_id, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         usuario = await servico_usuarios.criar_usuario(conn, empresa_id, "analista2@teste.com", "analista", "SenhaForte123!")
         await _criar_incidente_parado(conn, empresa_id, "203.0.114.5", "LOW", em_andamento_por=usuario["id"])
         resultado = await servico.auto_classificar_incidentes_abertos(conn, empresa_id, agora=_AGORA)
@@ -343,9 +338,9 @@ async def test_auto_classificar_ignora_incidente_ja_tocado_por_humano(pool, empr
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_obter_contagem_falsos_positivos(pool, empresa_factory):
+async def test_obter_contagem_falsos_positivos(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Contagem Falsos Positivos")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         assert await servico.obter_contagem_falsos_positivos(conn, empresa_id, "203.0.114.6") == 0
 
         incidente = await servico_incidentes.criar_incidente(
@@ -359,7 +354,7 @@ async def test_obter_contagem_falsos_positivos(pool, empresa_factory):
 
 
 @pytest.mark.asyncio
-async def test_obter_contagem_falsos_positivos_ignora_falso_positivo_de_endpoint(pool, empresa_factory):
+async def test_obter_contagem_falsos_positivos_ignora_falso_positivo_de_endpoint(db, empresa_factory):
     """
     Correção de bug de revisão crítica (2026-09), segunda rodada: um
     incidente de origem 'endpoint' (Sentinela Endpoint) marcado
@@ -374,7 +369,7 @@ async def test_obter_contagem_falsos_positivos_ignora_falso_positivo_de_endpoint
     vindos do mesmo endereço.
     """
     empresa_id = await empresa_factory("Empresa Contagem Falsos Positivos Endpoint")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         incidente_endpoint = await servico_incidentes.criar_incidente(
             conn, empresa_id, "203.0.114.8", {"severity": "MEDIUM", "score": 55}, ["Processo suspeito (endpoint)"],
             origem="endpoint",
@@ -398,9 +393,9 @@ async def test_obter_contagem_falsos_positivos_ignora_falso_positivo_de_endpoint
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_adicionar_listar_remover_ip_protegido(pool, empresa_factory):
+async def test_adicionar_listar_remover_ip_protegido(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Ips Protegidos")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         adicionado = await servico.adicionar_ip_protegido(conn, empresa_id, "203.0.114.8", motivo="teste manual")
         assert adicionado["ip"] == "203.0.114.8"
         assert adicionado["origem"] == "manual"
@@ -417,16 +412,16 @@ async def test_adicionar_listar_remover_ip_protegido(pool, empresa_factory):
 
 
 @pytest.mark.asyncio
-async def test_remover_ip_protegido_inexistente_retorna_false(pool, empresa_factory):
+async def test_remover_ip_protegido_inexistente_retorna_false(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Ips Protegidos Vazia")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         assert await servico.remover_ip_protegido(conn, empresa_id, "203.0.114.9") is False
 
 
 @pytest.mark.asyncio
-async def test_adicionar_ip_ja_protegido_atualiza_motivo_sem_duplicar(pool, empresa_factory):
+async def test_adicionar_ip_ja_protegido_atualiza_motivo_sem_duplicar(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Ips Protegidos Duplicata")
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         await servico.adicionar_ip_protegido(conn, empresa_id, "203.0.114.10", motivo="primeiro motivo")
         atualizado = await servico.adicionar_ip_protegido(conn, empresa_id, "203.0.114.10", motivo="segundo motivo")
 
@@ -436,14 +431,14 @@ async def test_adicionar_ip_ja_protegido_atualiza_motivo_sem_duplicar(pool, empr
 
 
 @pytest.mark.asyncio
-async def test_ips_protegidos_de_uma_empresa_nao_aparecem_para_outra(pool, empresa_factory):
+async def test_ips_protegidos_de_uma_empresa_nao_aparecem_para_outra(db, empresa_factory):
     empresa_a = await empresa_factory("Empresa Ips Protegidos A")
     empresa_b = await empresa_factory("Empresa Ips Protegidos B")
 
-    async with tenant_scoped_connection(pool, empresa_a) as conn:
+    async with db.tenant_session(empresa_a) as conn:
         await servico.adicionar_ip_protegido(conn, empresa_a, "203.0.114.11", motivo="teste")
 
-    async with tenant_scoped_connection(pool, empresa_b) as conn:
+    async with db.tenant_session(empresa_b) as conn:
         assert await servico.listar_ips_protegidos(conn, empresa_b) == []
 
 
@@ -452,27 +447,27 @@ async def test_ips_protegidos_de_uma_empresa_nao_aparecem_para_outra(pool, empre
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_executar_ciclo_autonomo_ignora_empresas_sem_nenhuma_flag_ligada(pool, empresa_factory):
+async def test_executar_ciclo_autonomo_ignora_empresas_sem_nenhuma_flag_ligada(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Ciclo Sem Flags")
-    await _configurar_empresa(pool, empresa_id, modo_firewall_auto=False, auto_triagem_incidentes=False)
+    await _configurar_empresa(db, empresa_id, modo_firewall_auto=False, auto_triagem_incidentes=False)
 
-    resultado = await servico.executar_ciclo_autonomo(pool)
+    resultado = await servico.executar_ciclo_autonomo(db)
     assert not any(a["empresa_id"] == str(empresa_id) for a in resultado["ajustes_modo"])
     assert not any(t["empresa_id"] == str(empresa_id) for t in resultado["triagens"])
 
 
 @pytest.mark.asyncio
-async def test_executar_ciclo_autonomo_processa_empresa_elegivel_isoladamente(pool, empresa_factory):
+async def test_executar_ciclo_autonomo_processa_empresa_elegivel_isoladamente(db, empresa_factory):
     """Uma empresa com a flag de auto-triagem ligada é processada pelo
     ciclo -- e uma falha (aqui simulada por outra empresa sem elegibilidade)
     não impede o processamento das demais."""
     empresa_elegivel = await empresa_factory("Empresa Ciclo Elegivel")
-    await _configurar_empresa(pool, empresa_elegivel, auto_triagem_incidentes=True)
+    await _configurar_empresa(db, empresa_elegivel, auto_triagem_incidentes=True)
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         incidente = await _criar_incidente_parado(conn, empresa_elegivel, "203.0.114.12", "LOW")
 
-    resultado = await servico.executar_ciclo_autonomo(pool)
+    resultado = await servico.executar_ciclo_autonomo(db)
 
     triagens_desta_empresa = [t for t in resultado["triagens"] if t["empresa_id"] == str(empresa_elegivel)]
     assert triagens_desta_empresa == [

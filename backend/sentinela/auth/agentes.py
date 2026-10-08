@@ -10,7 +10,7 @@ para uma máquina com um token de longa duração, não um humano com senha.
 Mesmo problema de "ovo e galinha" do login: RLS em `agentes` exige um
 tenant já setado, mas no momento em que só temos o token ainda não sabemos
 a empresa. Resolvido do mesmo jeito -- uma busca via
-`superadmin_scoped_connection` (BYPASSRLS), indexada, aqui pelo PREFIXO do
+`Database.superadmin_session` (BYPASSRLS), indexada, aqui pelo PREFIXO do
 token (não pelo token inteiro, que só existe em hash).
 
 Formato do token: "agt_<prefixo 12 hex>_<segredo 43 chars url-safe>".
@@ -21,13 +21,14 @@ em vez de rodar bcrypt.checkpw contra TODO agente cadastrado a cada
 heartbeat (o mesmo trade-off que uma API key de qualquer provedor --
 GitHub, Stripe -- faz).
 """
-import asyncio
+import logging
 import secrets
 
 import bcrypt
 
-from sentinela.auth.security import verificar_senha
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.auth.cache_token import cache_tokens
+from sentinela.auth.security import hash_token, hash_token_e_rapido
+from sentinela.repositories.agentes import AgenteRepositorio
 
 PREFIXO_TOKEN = "agt"
 TAMANHO_PREFIXO_HEX = 12
@@ -60,7 +61,7 @@ def extrair_prefixo(token: str) -> str | None:
     return prefixo
 
 
-async def autenticar_agente(pool, token: str) -> dict | None:
+async def autenticar_agente(db, token: str) -> dict | None:
     """
     Retorna {"agente_id", "empresa_id", "hostname"} se o token bater com um
     agente com status='ativo', ou None. Nunca levanta exceção por token
@@ -68,24 +69,34 @@ async def autenticar_agente(pool, token: str) -> dict | None:
     auth/dependencies.py:agente_atual).
     """
     prefixo = extrair_prefixo(token or "")
-    async with superadmin_scoped_connection(pool) as conn:
-        agente = None
-        if prefixo is not None:
-            agente = await conn.fetchrow(
-                """
-                SELECT id, empresa_id, hostname, token_hash
-                FROM agentes
-                WHERE token_prefixo = $1 AND status = 'ativo'
-                """,
-                prefixo,
-            )
-        token_valido = await asyncio.to_thread(
-            verificar_senha, token, agente["token_hash"] if agente else _HASH_DUMMY
-        )
-        if agente and token_valido:
-            return {
-                "agente_id": agente["id"],
-                "empresa_id": agente["empresa_id"],
-                "hostname": agente["hostname"],
-            }
+    # A consulta (barata) roda e a sessão é devolvida ao pool ANTES do bcrypt:
+    # o hash é caro em CPU e não deve segurar uma conexão do banco aberta.
+    agente = None
+    if prefixo is not None:
+        async with db.superadmin_session() as sessao:
+            agente = await AgenteRepositorio(sessao).buscar_ativo_por_prefixo(prefixo)
+    # `cache_tokens` evita o bcrypt quando este MESMO token já foi verificado contra o MESMO hash que está no banco
+    # agora (ver auth/cache_token.py); um token revogado nem chega aqui, porque a linha deixa de ser encontrada.
+    token_valido = await cache_tokens.verificar(token, agente["token_hash"] if agente else _HASH_DUMMY)
+    if agente and token_valido and not hash_token_e_rapido(agente["token_hash"]):
+        await _migrar_para_hash_rapido(db, agente["id"], token)
+    if agente and token_valido:
+        return {
+            "agente_id": agente["id"],
+            "empresa_id": agente["empresa_id"],
+            "hostname": agente["hostname"],
+        }
     return None
+
+
+async def _migrar_para_hash_rapido(db, agente_id, token: str) -> None:
+    """
+    Token emitido antes do hash rápido (bcrypt): na primeira verificação bem-sucedida troca o hash guardado por
+    `sha256$...` (ver `auth.security.hash_token`), e os heartbeats seguintes deixam de pagar bcrypt. Melhor esforço:
+    falhar aqui nunca derruba a autenticação.
+    """
+    try:
+        async with db.superadmin_session() as sessao:
+            await AgenteRepositorio(sessao).atualizar_token_hash(agente_id, hash_token(token))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("não foi possível migrar o hash do token", exc_info=True)

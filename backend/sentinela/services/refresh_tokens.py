@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 
 from sentinela.auth.security import gerar_refresh_token, hash_refresh_token
 from sentinela.repositories.refresh_tokens import RefreshTokenRepositorio
+from sentinela.repositories.superadmins import SuperadminRepositorio
+from sentinela.repositories.usuarios import UsuarioRepositorio
 
 REFRESH_DIAS = 30
 
@@ -42,3 +44,34 @@ async def rotacionar(sessao, token: str):
     await repo.marcar_usado(registro.id)
     novo, family_id = await criar(sessao, registro.conta_tipo, registro.conta_id, registro.token_version, registro.family_id)
     return {**registro.para_dict(), "novo_token": novo, "family_id": family_id}, None
+
+
+async def renovar_sessao(sessao, token: str):
+    """
+    Rotaciona o refresh token e remonta o payload da sessão a partir do estado ATUAL da conta.
+
+    Devolve `(payload, novo_refresh_token, erro)`. Quem chama NÃO deve levantar exceção de dentro da
+    sessão quando `erro` vier preenchido: no caso `replay` a revogação da família (e o aumento do
+    `token_version` da conta) acabou de ser gravada, e uma exceção faria rollback justamente disso.
+    `erro`: invalido | revogado | replay | expirado (token) ou sessao_invalida (conta inativa/versão antiga).
+    """
+    resultado, erro = await rotacionar(sessao, token)
+    if erro:
+        return None, None, erro
+    if resultado["conta_tipo"] == "superadmin":
+        conta = await SuperadminRepositorio(sessao).obter_para_refresh(resultado["conta_id"])
+        if conta is None or conta["token_version"] != resultado["token_version"]:
+            return None, None, "sessao_invalida"
+        payload = {
+            "sub": str(conta["id"]), "empresa_id": None, "papel": "superadmin", "email": conta["email"],
+            "tv": conta["token_version"], "papel_saas": conta["papel"],
+        }
+    else:
+        conta = await UsuarioRepositorio(sessao).obter_para_refresh(resultado["conta_id"])
+        if conta is None or not conta["ativo"] or conta["token_version"] != resultado["token_version"]:
+            return None, None, "sessao_invalida"
+        payload = {
+            "sub": str(conta["id"]), "empresa_id": str(conta["empresa_id"]), "papel": conta["papel"],
+            "email": conta["email"], "tv": conta["token_version"],
+        }
+    return payload, resultado["novo_token"], None

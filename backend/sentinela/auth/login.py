@@ -9,7 +9,7 @@ consultar `usuarios`/`superadmins` ANTES de saber a empresa do chamador
 (problema do "ovo e galinha": RLS em `usuarios` exige um tenant já setado,
 mas no momento do login ainda não sabemos qual é).
 
-Resolvido rodando numa `superadmin_scoped_connection` (BYPASSRLS) fazendo
+Resolvido rodando numa `Database.superadmin_session` (BYPASSRLS) fazendo
 só uma busca indexada por email — seguro porque o filtro (email) vem do
 próprio chamador, e a única coisa que sai daqui é o suficiente para
 verificar uma senha e emitir um JWT, nunca uma listagem.
@@ -42,7 +42,7 @@ class ContaEmpresaInativaError(Exception):
         self.status = status
 
 
-async def autenticar(pool, email: str, senha: str):
+async def autenticar(db, email: str, senha: str):
     """
     Retorna um dict {"tipo": "usuario"|"superadmin", ...campos} se as
     credenciais baterem e (no caso de usuário de empresa) a empresa estiver
@@ -74,7 +74,7 @@ async def autenticar(pool, email: str, senha: str):
     # As duas consultas (cada qual com seu hash real ou HASH_DUMMY) rodam
     # ANTES do bcrypt e a conexão é devolvida ao pool antes dele: o hash é
     # caro em CPU e não deve segurar uma conexão/transação do banco aberta.
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         usuario = await UsuarioRepositorio(sessao).buscar_ativo_para_login(email)
         superadmin = await SuperadminRepositorio(sessao).buscar_para_login(email)
 

@@ -51,7 +51,7 @@ CREATE POLICY tenant_isolation_agentes_enrollment_tokens ON agentes_enrollment_t
 -- token_prefixo já é UNIQUE (cria o índice) -- documentado pelo mesmo
 -- motivo do comentário equivalente em 0016/0019: o lookup de autenticação
 -- (troca do token de enrollment pela identidade do agente) roda via
--- superadmin_scoped_connection (BYPASSRLS), mesmo problema de "ovo e
+-- Database.superadmin_session (BYPASSRLS), mesmo problema de "ovo e
 -- galinha" do login/agentes/licenças -- não se sabe o tenant antes de
 -- resolver o token.
 CREATE INDEX IF NOT EXISTS idx_agentes_enrollment_tokens_empresa ON agentes_enrollment_tokens (empresa_id);

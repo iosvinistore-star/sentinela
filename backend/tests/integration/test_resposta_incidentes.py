@@ -20,21 +20,21 @@ import pytest
 from sentinela.core import firewall as core_firewall
 from sentinela.core import reputacao as core_reputacao
 from sentinela.core.analisador_logs import processar_arquivo_logs
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
 from sentinela.services import incidentes as servico_incidentes
 from sentinela.services.resposta_incidentes import responder_a_incidentes
+from tests.sql_cru import executar, valor
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_ignora_ip_no_limite_exato(pool, empresa_factory, arquivo_log_exemplo):
+async def test_ignora_ip_no_limite_exato(db, empresa_factory, arquivo_log_exemplo):
     empresa_id = await empresa_factory("Empresa Resposta 1")
     relatorio = processar_arquivo_logs(arquivo_log_exemplo)
 
     with patch.object(core_reputacao, "consultar_abuseipdb") as abuse_mock, \
          patch.object(core_firewall.subprocess, "run") as run_mock:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(conn, empresa_id, relatorio, limite_ataques=5, bloquear=True)
 
     assert respostas == []
@@ -43,7 +43,7 @@ async def test_ignora_ip_no_limite_exato(pool, empresa_factory, arquivo_log_exem
 
 
 @pytest.mark.asyncio
-async def test_permitir_escalonamento_por_correlacao_e_opt_in_e_ainda_funciona(pool, empresa_factory, arquivo_log_exemplo):
+async def test_permitir_escalonamento_por_correlacao_e_opt_in_e_ainda_funciona(db, empresa_factory, arquivo_log_exemplo):
     """
     Mesmo cenário de `test_ignora_ip_no_limite_exato` (IP exatamente no
     limite, sem ultrapassá-lo), mas agora com
@@ -59,7 +59,7 @@ async def test_permitir_escalonamento_por_correlacao_e_opt_in_e_ainda_funciona(p
          patch.object(core_firewall.subprocess, "run") as run_mock:
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, bloquear=True,
                 permitir_escalonamento_por_correlacao=True,
@@ -71,7 +71,7 @@ async def test_permitir_escalonamento_por_correlacao_e_opt_in_e_ainda_funciona(p
 
 
 @pytest.mark.asyncio
-async def test_acima_do_limite_cria_incidente_de_verdade_no_postgres(pool, empresa_factory, arquivo_log_exemplo):
+async def test_acima_do_limite_cria_incidente_de_verdade_no_postgres(db, empresa_factory, arquivo_log_exemplo):
     """A CORREÇÃO DA LACUNA: analisar um log e responder a incidentes agora
     grava em Postgres, visível depois via listar_incidentes -- não só
     desenha gráfico."""
@@ -84,7 +84,7 @@ async def test_acima_do_limite_cria_incidente_de_verdade_no_postgres(pool, empre
          patch.object(core_firewall.subprocess, "run") as run_mock:
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=4, verificar_reputacao=True,
                 bloquear=True, duracao_horas=1, origem="teste",
@@ -98,25 +98,25 @@ async def test_acima_do_limite_cria_incidente_de_verdade_no_postgres(pool, empre
     assert respostas[0]["incident_id"] is not None
 
     from sentinela.services import incidentes as servico_incidentes
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         listados = await servico_incidentes.listar_incidentes(conn)
     assert len(listados) == 1
     assert listados[0]["ip"] == "203.0.113.5"
 
 
 @pytest.mark.asyncio
-async def test_incidente_criado_para_empresa_a_nao_aparece_para_empresa_b(pool, empresa_factory, arquivo_log_exemplo):
+async def test_incidente_criado_para_empresa_a_nao_aparece_para_empresa_b(db, empresa_factory, arquivo_log_exemplo):
     empresa_a = await empresa_factory("Empresa Resposta A")
     empresa_b = await empresa_factory("Empresa Resposta B")
     relatorio = processar_arquivo_logs(arquivo_log_exemplo)
 
     with patch.object(core_reputacao, "consultar_abuseipdb", return_value={"score_abuso": 90}), \
          patch.object(core_reputacao, "consultar_virustotal", return_value={"maliciosos": 8}):
-        async with tenant_scoped_connection(pool, empresa_a) as conn:
+        async with db.tenant_session(empresa_a) as conn:
             await responder_a_incidentes(conn, empresa_a, relatorio, limite_ataques=4, verificar_reputacao=True, bloquear=False)
 
     from sentinela.services import incidentes as servico_incidentes
-    async with tenant_scoped_connection(pool, empresa_b) as conn:
+    async with db.tenant_session(empresa_b) as conn:
         listados_b = await servico_incidentes.listar_incidentes(conn)
     assert listados_b == []
 
@@ -144,7 +144,7 @@ def _relatorio_sintetico(ips_e_contagens):
 
 
 @pytest.mark.asyncio
-async def test_falha_em_um_candidato_nao_aborta_o_lote_inteiro(pool, empresa_factory):
+async def test_falha_em_um_candidato_nao_aborta_o_lote_inteiro(db, empresa_factory):
     """
     Defesa em profundidade: um candidato cuja consulta de reputação falhe
     (rede fora do ar, erro inesperado, etc.) não deve impedir os OUTROS
@@ -167,7 +167,7 @@ async def test_falha_em_um_candidato_nao_aborta_o_lote_inteiro(pool, empresa_fac
         return {"ip": ip, "classificacao": "ALTO RISCO", "abuseipdb": {"score_abuso": 90}, "virustotal": {}}
 
     with patch.object(servico_reputacao, "consultar_reputacao_ip", side_effect=_reputacao_fake):
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=True, bloquear=False,
             )
@@ -183,20 +183,20 @@ async def test_falha_em_um_candidato_nao_aborta_o_lote_inteiro(pool, empresa_fac
     # isolou o erro) -- confirma consultando o incidente de verdade em
     # Postgres na mesma conexão que processou o lote.
     from sentinela.services import incidentes as servico_incidentes
-    async with tenant_scoped_connection(pool, empresa_id) as conn2:
+    async with db.tenant_session(empresa_id) as conn2:
         listados = await servico_incidentes.listar_incidentes(conn2)
     assert len(listados) == 1
     assert listados[0]["ip"] == "203.0.113.201"
 
 
 @pytest.mark.asyncio
-async def test_sem_flags_nao_chama_reputacao_nem_bloqueio(pool, empresa_factory, arquivo_log_exemplo):
+async def test_sem_flags_nao_chama_reputacao_nem_bloqueio(db, empresa_factory, arquivo_log_exemplo):
     empresa_id = await empresa_factory("Empresa Resposta 3")
     relatorio = processar_arquivo_logs(arquivo_log_exemplo)
 
     with patch.object(core_reputacao, "consultar_abuseipdb") as abuse_mock, \
          patch.object(core_firewall.subprocess, "run") as run_mock:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=4, verificar_reputacao=False, bloquear=False
             )
@@ -213,13 +213,13 @@ async def test_sem_flags_nao_chama_reputacao_nem_bloqueio(pool, empresa_factory,
 # modo de firewall por tenant, e incidente_id linkado ao bloqueio.
 # ---------------------------------------------------------------------------
 
-async def _definir_modo_firewall(pool, empresa_id, modo):
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE empresas SET modo_firewall = $2 WHERE id = $1", empresa_id, modo)
+async def _definir_modo_firewall(db, empresa_id, modo):
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE empresas SET modo_firewall = $2 WHERE id = $1", empresa_id, modo)
 
 
 @pytest.mark.asyncio
-async def test_kill_switch_global_forca_dry_run_mesmo_com_bloquear_true(pool, empresa_factory):
+async def test_kill_switch_global_forca_dry_run_mesmo_com_bloquear_true(db, empresa_factory):
     """`automacao_habilitada=False` (o kill-switch global, ver
     Settings.firewall_automacao_habilitada) vence QUALQUER combinação de
     bloquear/modo_resposta/modo_firewall pedida pelo chamador."""
@@ -227,7 +227,7 @@ async def test_kill_switch_global_forca_dry_run_mesmo_com_bloquear_true(pool, em
     relatorio = _relatorio_sintetico([("203.0.113.150", 6)])
 
     with patch.object(core_firewall.subprocess, "run") as run_mock:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False,
                 bloquear=True, automacao_habilitada=False,
@@ -239,14 +239,14 @@ async def test_kill_switch_global_forca_dry_run_mesmo_com_bloquear_true(pool, em
 
 
 @pytest.mark.asyncio
-async def test_modo_firewall_observacao_nunca_bloqueia(pool, empresa_factory):
+async def test_modo_firewall_observacao_nunca_bloqueia(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Modo Observacao")
-    await _definir_modo_firewall(pool, empresa_id, "observacao")
+    await _definir_modo_firewall(db, empresa_id, "observacao")
     relatorio = _relatorio_sintetico([("203.0.113.151", 6)])
 
     with patch.object(core_firewall, "_tem_privilegios_root", return_value=True), \
          patch.object(core_firewall.subprocess, "run") as run_mock:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False, bloquear=True,
             )
@@ -258,17 +258,17 @@ async def test_modo_firewall_observacao_nunca_bloqueia(pool, empresa_factory):
 
 
 @pytest.mark.asyncio
-async def test_modo_firewall_manual_desliga_resposta_automatica(pool, empresa_factory):
+async def test_modo_firewall_manual_desliga_resposta_automatica(db, empresa_factory):
     """"manual" -- resposta automática (a que este módulo implementa)
     desligada; o bloqueio manual continua disponível via
     POST /api/v1/firewall/bloqueios (rota separada, não afetada por este
     modo -- ver api/v1/firewall.py)."""
     empresa_id = await empresa_factory("Empresa Modo Manual")
-    await _definir_modo_firewall(pool, empresa_id, "manual")
+    await _definir_modo_firewall(db, empresa_id, "manual")
     relatorio = _relatorio_sintetico([("203.0.113.152", 6)])
 
     with patch.object(core_firewall.subprocess, "run") as run_mock:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False, bloquear=True,
             )
@@ -281,13 +281,13 @@ async def test_modo_firewall_manual_desliga_resposta_automatica(pool, empresa_fa
 
 
 @pytest.mark.asyncio
-async def test_modo_firewall_dry_run_forca_simulacao(pool, empresa_factory):
+async def test_modo_firewall_dry_run_forca_simulacao(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Modo Dry Run")
-    await _definir_modo_firewall(pool, empresa_id, "dry_run")
+    await _definir_modo_firewall(db, empresa_id, "dry_run")
     relatorio = _relatorio_sintetico([("203.0.113.153", 6)])
 
     with patch.object(core_firewall.subprocess, "run") as run_mock:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False,
                 bloquear=True, dry_run=False,  # o chamador nem pediu dry-run -- o MODO que força.
@@ -298,16 +298,16 @@ async def test_modo_firewall_dry_run_forca_simulacao(pool, empresa_factory):
 
 
 @pytest.mark.asyncio
-async def test_modo_automacao_controlada_limita_duracao_a_24h(pool, empresa_factory):
+async def test_modo_automacao_controlada_limita_duracao_a_24h(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Modo Controlada")
-    await _definir_modo_firewall(pool, empresa_id, "automacao_controlada")
+    await _definir_modo_firewall(db, empresa_id, "automacao_controlada")
     relatorio = _relatorio_sintetico([("203.0.113.154", 6)])
 
     with patch.object(core_firewall, "_tem_privilegios_root", return_value=True), \
          patch.object(core_firewall.subprocess, "run") as run_mock:
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False,
                 bloquear=True, duracao_horas=200,  # pede 200h -- "controlada" nunca honra isso.
@@ -324,16 +324,16 @@ async def test_modo_automacao_controlada_limita_duracao_a_24h(pool, empresa_fact
 
 
 @pytest.mark.asyncio
-async def test_modo_automacao_total_honra_duracao_pedida(pool, empresa_factory):
+async def test_modo_automacao_total_honra_duracao_pedida(db, empresa_factory):
     empresa_id = await empresa_factory("Empresa Modo Total")
-    await _definir_modo_firewall(pool, empresa_id, "automacao_total")
+    await _definir_modo_firewall(db, empresa_id, "automacao_total")
     relatorio = _relatorio_sintetico([("203.0.113.155", 6)])
 
     with patch.object(core_firewall, "_tem_privilegios_root", return_value=True), \
          patch.object(core_firewall.subprocess, "run") as run_mock:
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False,
                 bloquear=True, duracao_horas=200,
@@ -349,7 +349,7 @@ async def test_modo_automacao_total_honra_duracao_pedida(pool, empresa_factory):
 
 
 @pytest.mark.asyncio
-async def test_bloqueio_automatico_e_linkado_ao_incidente_que_o_originou(pool, empresa_factory):
+async def test_bloqueio_automatico_e_linkado_ao_incidente_que_o_originou(db, empresa_factory):
     """Item 10 -- rastreabilidade bloqueio -> incidente (ver
     migrations/0012_...sql: bloqueios_firewall.incidente_id)."""
     empresa_id = await empresa_factory("Empresa Rastreabilidade Bloqueio")
@@ -359,7 +359,7 @@ async def test_bloqueio_automatico_e_linkado_ao_incidente_que_o_originou(pool, e
          patch.object(core_firewall.subprocess, "run") as run_mock:
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as conn:
             respostas = await responder_a_incidentes(
                 conn, empresa_id, relatorio, limite_ataques=5, verificar_reputacao=False, bloquear=True,
             )
@@ -367,20 +367,18 @@ async def test_bloqueio_automatico_e_linkado_ao_incidente_que_o_originou(pool, e
     assert respostas[0]["incident_id"] is not None
     assert respostas[0]["bloqueio"]["incidente_id"] is not None
 
-    async with superadmin_scoped_connection(pool) as conn:
-        incidente_id_esperado = await conn.fetchval(
-            "SELECT id FROM incidentes WHERE empresa_id = $1 AND incident_id = $2",
+    async with db.superadmin_session() as conn:
+        incidente_id_esperado = await valor(conn, "SELECT id FROM incidentes WHERE empresa_id = $1 AND incident_id = $2",
             empresa_id, respostas[0]["incident_id"],
         )
-        incidente_id_no_bloqueio = await conn.fetchval(
-            "SELECT incidente_id FROM bloqueios_firewall WHERE empresa_id = $1 AND host(ip) = $2",
+        incidente_id_no_bloqueio = await valor(conn, "SELECT incidente_id FROM bloqueios_firewall WHERE empresa_id = $1 AND host(ip) = $2",
             empresa_id, "203.0.113.156",
         )
     assert incidente_id_no_bloqueio == incidente_id_esperado
 
 
 @pytest.mark.asyncio
-async def test_historico_de_falso_positivo_amortece_o_risco(pool, empresa_factory):
+async def test_historico_de_falso_positivo_amortece_o_risco(db, empresa_factory):
     """Capacidade 3 do modo autônomo (filtro de falso positivo mais
     esperto, sempre-ativo -- ver core/risk_engine.aplicar_amortecimento_falso_positivo
     e services/automacao.obter_contagem_falsos_positivos): um IP com 2+
@@ -393,7 +391,7 @@ async def test_historico_de_falso_positivo_amortece_o_risco(pool, empresa_factor
     empresa_sem_historico = await empresa_factory("Empresa Amortecimento Sem Historico")
     empresa_com_historico = await empresa_factory("Empresa Amortecimento Com Historico")
 
-    async with tenant_scoped_connection(pool, empresa_com_historico) as conn:
+    async with db.tenant_session(empresa_com_historico) as conn:
         for _ in range(2):
             incidente = await servico_incidentes.criar_incidente(
                 conn, empresa_com_historico, ip, {"severity": "HIGH", "score": 70}, ["SQL Injection (SQLi)"],
@@ -405,11 +403,11 @@ async def test_historico_de_falso_positivo_amortece_o_risco(pool, empresa_factor
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""
 
-        async with tenant_scoped_connection(pool, empresa_sem_historico) as conn:
+        async with db.tenant_session(empresa_sem_historico) as conn:
             resposta_sem_historico = await responder_a_incidentes(
                 conn, empresa_sem_historico, relatorio, limite_ataques=5, verificar_reputacao=False,
             )
-        async with tenant_scoped_connection(pool, empresa_com_historico) as conn:
+        async with db.tenant_session(empresa_com_historico) as conn:
             resposta_com_historico = await responder_a_incidentes(
                 conn, empresa_com_historico, relatorio, limite_ataques=5, verificar_reputacao=False,
             )

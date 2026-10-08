@@ -44,9 +44,9 @@ def _chave_unica(prefixo="teste"):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_registrar_falha_bloqueia_apos_max_tentativas(pool):
+async def test_registrar_falha_bloqueia_apos_max_tentativas(db):
     chave = _chave_unica("login")
-    limitador = LimitadorTentativasCompartilhado(pool, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
+    limitador = LimitadorTentativasCompartilhado(db, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
 
     for _ in range(2):
         assert await limitador.registrar_falha(chave) == 0.0
@@ -56,9 +56,9 @@ async def test_registrar_falha_bloqueia_apos_max_tentativas(pool):
 
 
 @pytest.mark.asyncio
-async def test_registrar_sucesso_limpa_bloqueio(pool):
+async def test_registrar_sucesso_limpa_bloqueio(db):
     chave = _chave_unica("login")
-    limitador = LimitadorTentativasCompartilhado(pool, max_tentativas=1, janela_segundos=300, bloqueio_segundos=60)
+    limitador = LimitadorTentativasCompartilhado(db, max_tentativas=1, janela_segundos=300, bloqueio_segundos=60)
 
     await limitador.registrar_falha(chave)
     assert await limitador.tempo_restante_bloqueio(chave) > 0
@@ -68,15 +68,15 @@ async def test_registrar_sucesso_limpa_bloqueio(pool):
 
 
 @pytest.mark.asyncio
-async def test_contador_compartilhado_entre_duas_instancias(pool):
+async def test_contador_compartilhado_entre_duas_instancias(db):
     """O cenário que motivou a migração: duas réplicas do processo (aqui,
     dois objetos Python distintos, nunca o mesmo) compartilhando o MESMO
     contador via Postgres -- ao contrário do LimitadorTentativas original,
     onde cada instância tinha seu próprio dict em memória e nunca veria as
     falhas registradas pela outra."""
     chave = _chave_unica("login")
-    replica_1 = LimitadorTentativasCompartilhado(pool, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
-    replica_2 = LimitadorTentativasCompartilhado(pool, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
+    replica_1 = LimitadorTentativasCompartilhado(db, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
+    replica_2 = LimitadorTentativasCompartilhado(db, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
 
     await replica_1.registrar_falha(chave)
     await replica_2.registrar_falha(chave)
@@ -89,11 +89,11 @@ async def test_contador_compartilhado_entre_duas_instancias(pool):
 
 
 @pytest.mark.asyncio
-async def test_janela_expirada_reseta_contador_em_vez_de_acumular(pool):
+async def test_janela_expirada_reseta_contador_em_vez_de_acumular(db):
     chave = _chave_unica("login")
     estado = {"agora": datetime(2026, 1, 1, tzinfo=timezone.utc)}
     limitador = LimitadorTentativasCompartilhado(
-        pool, max_tentativas=2, janela_segundos=60, bloqueio_segundos=30, agora=lambda: estado["agora"],
+        db, max_tentativas=2, janela_segundos=60, bloqueio_segundos=30, agora=lambda: estado["agora"],
     )
 
     await limitador.registrar_falha(chave)
@@ -111,14 +111,14 @@ async def test_janela_expirada_reseta_contador_em_vez_de_acumular(pool):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_reservar_tentativa_preserva_comportamento_sequencial_do_par_antigo(pool):
+async def test_reservar_tentativa_preserva_comportamento_sequencial_do_par_antigo(db):
     """Mesmo comportamento observável de tempo_restante_bloqueio+registrar_falha
     em uso sequencial: a tentativa que ATINGE max_tentativas ainda é permitida
     (0.0) -- só a tentativa SEGUINTE vê o bloqueio. Isto é o que
     test_heartbeat_com_token_invalido_repetido_e_rate_limitado_com_429 (em
     tests/api ou tests/unit, ver auth/dependencies.py) já depende."""
     chave = _chave_unica("reserva")
-    limitador = LimitadorTentativasCompartilhado(pool, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
+    limitador = LimitadorTentativasCompartilhado(db, max_tentativas=3, janela_segundos=300, bloqueio_segundos=60)
 
     assert await limitador.reservar_tentativa(chave) == 0.0
     assert await limitador.reservar_tentativa(chave) == 0.0
@@ -136,9 +136,9 @@ async def test_reservar_tentativa_preserva_comportamento_sequencial_do_par_antig
 
 
 @pytest.mark.asyncio
-async def test_reservar_tentativa_ja_bloqueado_rejeita_sem_incrementar(pool):
+async def test_reservar_tentativa_ja_bloqueado_rejeita_sem_incrementar(db):
     chave = _chave_unica("reserva")
-    limitador = LimitadorTentativasCompartilhado(pool, max_tentativas=1, janela_segundos=300, bloqueio_segundos=60)
+    limitador = LimitadorTentativasCompartilhado(db, max_tentativas=1, janela_segundos=300, bloqueio_segundos=60)
 
     assert await limitador.reservar_tentativa(chave) == 0.0  # cruza max_tentativas=1
     restante_1 = await limitador.reservar_tentativa(chave)
@@ -148,7 +148,7 @@ async def test_reservar_tentativa_ja_bloqueado_rejeita_sem_incrementar(pool):
 
 
 @pytest.mark.asyncio
-async def test_reservar_tentativa_fecha_a_corrida_de_concorrencia(pool):
+async def test_reservar_tentativa_fecha_a_corrida_de_concorrencia(db):
     """Repro direto do achado 1 da revisão crítica: 30 'tentativas de login'
     concorrentes para a MESMA chave, cada uma simulando uma tentativa de auth
     lenta (bcrypt) entre a reserva e o resultado. Com o par antigo
@@ -161,7 +161,7 @@ async def test_reservar_tentativa_fecha_a_corrida_de_concorrencia(pool):
     chave = _chave_unica("concorrencia")
     max_tentativas = 5
     limitador = LimitadorTentativasCompartilhado(
-        pool, max_tentativas=max_tentativas, janela_segundos=300, bloqueio_segundos=60,
+        db, max_tentativas=max_tentativas, janela_segundos=300, bloqueio_segundos=60,
     )
 
     async def tentativa_de_login():
@@ -192,9 +192,9 @@ async def test_reservar_tentativa_fecha_a_corrida_de_concorrencia(pool):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_reservar_volume_bloqueia_acima_do_teto_por_usuario(pool):
+async def test_reservar_volume_bloqueia_acima_do_teto_por_usuario(db):
     usuario_id, empresa_id = str(uuid.uuid4()), str(uuid.uuid4())
-    limitador = LimitadorUploadsCompartilhado(pool, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000)
+    limitador = LimitadorUploadsCompartilhado(db, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000)
 
     await limitador.reservar_volume(usuario_id, empresa_id, 60)
     with pytest.raises(LimiteUploadExcedidoError) as exc:
@@ -203,9 +203,9 @@ async def test_reservar_volume_bloqueia_acima_do_teto_por_usuario(pool):
 
 
 @pytest.mark.asyncio
-async def test_reservar_volume_bloqueia_acima_do_teto_por_empresa_mesmo_com_usuarios_diferentes(pool):
+async def test_reservar_volume_bloqueia_acima_do_teto_por_empresa_mesmo_com_usuarios_diferentes(db):
     empresa_id = str(uuid.uuid4())
-    limitador = LimitadorUploadsCompartilhado(pool, teto_bytes_por_usuario=10_000, teto_bytes_por_empresa=100)
+    limitador = LimitadorUploadsCompartilhado(db, teto_bytes_por_usuario=10_000, teto_bytes_por_empresa=100)
 
     await limitador.reservar_volume(str(uuid.uuid4()), empresa_id, 60)
     with pytest.raises(LimiteUploadExcedidoError) as exc:
@@ -214,8 +214,8 @@ async def test_reservar_volume_bloqueia_acima_do_teto_por_empresa_mesmo_com_usua
 
 
 @pytest.mark.asyncio
-async def test_reservar_volume_nao_afeta_outro_usuario_ou_empresa(pool):
-    limitador = LimitadorUploadsCompartilhado(pool, teto_bytes_por_usuario=100, teto_bytes_por_empresa=100)
+async def test_reservar_volume_nao_afeta_outro_usuario_ou_empresa(db):
+    limitador = LimitadorUploadsCompartilhado(db, teto_bytes_por_usuario=100, teto_bytes_por_empresa=100)
     usuario_a, empresa_a = str(uuid.uuid4()), str(uuid.uuid4())
     usuario_b, empresa_b = str(uuid.uuid4()), str(uuid.uuid4())
 
@@ -225,12 +225,12 @@ async def test_reservar_volume_nao_afeta_outro_usuario_ou_empresa(pool):
 
 
 @pytest.mark.asyncio
-async def test_reservar_volume_compartilhado_entre_duas_instancias(pool):
+async def test_reservar_volume_compartilhado_entre_duas_instancias(db):
     """Mesma propriedade central do limitador de tentativas: duas réplicas
     apontando para o mesmo pool compartilham a mesma cota."""
     usuario_id, empresa_id = str(uuid.uuid4()), str(uuid.uuid4())
-    replica_1 = LimitadorUploadsCompartilhado(pool, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000)
-    replica_2 = LimitadorUploadsCompartilhado(pool, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000)
+    replica_1 = LimitadorUploadsCompartilhado(db, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000)
+    replica_2 = LimitadorUploadsCompartilhado(db, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000)
 
     await replica_1.reservar_volume(usuario_id, empresa_id, 60)
     with pytest.raises(LimiteUploadExcedidoError):
@@ -238,11 +238,11 @@ async def test_reservar_volume_compartilhado_entre_duas_instancias(pool):
 
 
 @pytest.mark.asyncio
-async def test_reservar_volume_janela_expirada_libera_cota_novamente(pool):
+async def test_reservar_volume_janela_expirada_libera_cota_novamente(db):
     usuario_id, empresa_id = str(uuid.uuid4()), str(uuid.uuid4())
     estado = {"agora": datetime(2026, 1, 1, tzinfo=timezone.utc)}
     limitador = LimitadorUploadsCompartilhado(
-        pool, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000,
+        db, teto_bytes_por_usuario=100, teto_bytes_por_empresa=10_000,
         janela_usuario_segundos=3600, agora=lambda: estado["agora"],
     )
 
@@ -252,13 +252,13 @@ async def test_reservar_volume_janela_expirada_libera_cota_novamente(pool):
 
 
 @pytest.mark.asyncio
-async def test_processamento_e_concorrencia_continuam_em_memoria_por_replica(pool):
+async def test_processamento_e_concorrencia_continuam_em_memoria_por_replica(db):
     """`processamento()` (concorrência) é a única parte que continua
     deliberadamente em memória/por-processo -- ver docstring da classe.
     Duas instâncias distintas (réplicas diferentes) NÃO compartilham este
     semáforo, ao contrário das cotas de volume acima."""
-    replica_1 = LimitadorUploadsCompartilhado(pool, max_concorrentes=1)
-    replica_2 = LimitadorUploadsCompartilhado(pool, max_concorrentes=1)
+    replica_1 = LimitadorUploadsCompartilhado(db, max_concorrentes=1)
+    replica_2 = LimitadorUploadsCompartilhado(db, max_concorrentes=1)
 
     async with replica_1.processamento():
         # Mesma réplica, semáforo já ocupado -- deveria recusar.

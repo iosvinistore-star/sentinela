@@ -18,13 +18,12 @@ docker-compose.test.yml, para "just work" localmente):
 import os
 import uuid
 
-import asyncpg
 import pytest
 import pytest_asyncio
 
 from sentinela.db.migrations.run_migrations import aplicar_migrations
 from sentinela.database import Database, DatabaseSettings
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
+from tests.sql_cru import executar
 
 TEST_DATABASE_URL_ADMIN = os.environ.get(
     "TEST_DATABASE_URL_ADMIN", "postgresql://postgres:postgres_admin_pw@localhost:5432/sentinela_test"
@@ -44,14 +43,14 @@ async def _schema_aplicado():
 
 
 @pytest_asyncio.fixture(scope="session")
-async def pool(_schema_aplicado):
+async def db(_schema_aplicado):
     p = Database.conectar(DatabaseSettings(url=TEST_DATABASE_URL, pool_size=5, max_overflow=5))
     yield p
     await p.fechar()
 
 
 @pytest_asyncio.fixture(scope="session")
-async def pool_admin(_schema_aplicado):
+async def db_admin(_schema_aplicado):
     """Pool com a DSN de superusuário — só para limpeza/inspeção direta nos testes."""
     p = Database.conectar(DatabaseSettings(url=TEST_DATABASE_URL_ADMIN, pool_size=2, max_overflow=2))
     yield p
@@ -59,7 +58,7 @@ async def pool_admin(_schema_aplicado):
 
 
 @pytest_asyncio.fixture
-async def empresa_factory(pool):
+async def empresa_factory(db):
     """
     Cria empresas de teste (via conexão superadmin, que ignora RLS) e limpa
     tudo que essas empresas geraram ao final do teste — mantém cada teste
@@ -69,20 +68,19 @@ async def empresa_factory(pool):
 
     async def _criar(nome="Empresa Teste"):
         empresa_id = uuid.uuid4()
-        async with superadmin_scoped_connection(pool) as conn:
-            await conn.execute(
-                "INSERT INTO empresas (id, nome) VALUES ($1, $2)", empresa_id, nome
+        async with db.superadmin_session() as conn:
+            await executar(conn, "INSERT INTO empresas (id, nome) VALUES ($1, $2)", empresa_id, nome
             )
         criadas.append(empresa_id)
         return empresa_id
 
     yield _criar
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         for empresa_id in criadas:
-            await conn.execute("DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM bloqueios_firewall WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM incidentes WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM auditoria WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM bloqueios_firewall WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM incidentes WHERE empresa_id = $1", empresa_id)
             # reputacao_cache virou tenant-scoped (FK para empresas.id, ver
             # migrations/0007_reputacao_cache_tenant.sql) depois que esta
             # fixture de limpeza já existia -- sem apagar aqui também, o
@@ -90,11 +88,11 @@ async def empresa_factory(pool):
             # sempre que o teste consultou reputação de algum IP, e o erro
             # de teardown quebra (com ERROR, não FAILED) qualquer teste que
             # tenha usado reputação real em Postgres.
-            await conn.execute("DELETE FROM reputacao_cache WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM reputacao_cache WHERE empresa_id = $1", empresa_id)
             # ips_protegidos (migrations/0014_autonomia_operacional.sql) --
             # mesmo motivo de reputacao_cache acima: FK para empresas.id
             # sem CASCADE.
-            await conn.execute("DELETE FROM ips_protegidos WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM ips_protegidos WHERE empresa_id = $1", empresa_id)
             # licencas_eventos/licencas_endpoints/licencas
             # (migrations/0019_licenciamento.sql) -- mesmo motivo de
             # reputacao_cache/ips_protegidos acima (FK para empresas.id sem
@@ -103,9 +101,9 @@ async def empresa_factory(pool):
             # CASCADE -- na ordem errada, apagar o agente primeiro estoura
             # ForeignKeyViolationError no teardown de qualquer teste que
             # tenha ocupado uma vaga de endpoint numa licença.
-            await conn.execute("DELETE FROM licencas_eventos WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM licencas_endpoints WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM licencas WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM licencas_eventos WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM licencas_endpoints WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM licencas WHERE empresa_id = $1", empresa_id)
             # agentes_eventos/agentes (migrations/0016_agentes_endpoint.sql)
             # -- mesmo motivo de reputacao_cache/ips_protegidos acima (FK
             # para empresas.id sem CASCADE). Precisa vir ANTES do DELETE FROM
@@ -116,25 +114,25 @@ async def empresa_factory(pool):
             # eventos_siem/eventos_siem_cold (migrations 0024/0025): FK para
             # empresas e agentes sem CASCADE -- precisa vir antes de agentes.
             # (app_superadmin recebeu SELECT/DELETE nelas em 0030.)
-            await conn.execute("DELETE FROM eventos_siem WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM eventos_siem_cold WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM agentes_eventos WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM agentes WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM eventos_siem WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM eventos_siem_cold WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM agentes_eventos WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM agentes WHERE empresa_id = $1", empresa_id)
             # agentes_enrollment_tokens (migrations/0022_agentes_enrollment.sql,
             # Fase D / D3) -- mesmo motivo de agentes/agentes_eventos acima:
             # `criado_por_usuario_id` referencia usuarios(id) sem CASCADE
             # (de propósito -- ver a migration). Precisa vir ANTES do DELETE
             # FROM usuarios logo abaixo, mesma ordem já aplicada a agentes.
-            await conn.execute("DELETE FROM agentes_enrollment_tokens WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM agentes_enrollment_tokens WHERE empresa_id = $1", empresa_id)
             # redefinicoes_senha não precisa de DELETE explícito aqui: tem
             # ON DELETE CASCADE em usuario_id (ver migrations/0009).
-            await conn.execute("DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
-            await conn.execute("DELETE FROM empresas WHERE id = $1", empresa_id)
+            await executar(conn, "DELETE FROM usuarios WHERE empresa_id = $1", empresa_id)
+            await executar(conn, "DELETE FROM empresas WHERE id = $1", empresa_id)
 
 
 @pytest.fixture
-def conexao_tenant_factory(pool):
+def conexao_tenant_factory(db):
     """Atalho: `async with conexao_tenant_factory(empresa_id) as conn: ...`"""
     def _factory(empresa_id):
-        return tenant_scoped_connection(pool, empresa_id)
+        return db.tenant_session(empresa_id)
     return _factory

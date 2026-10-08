@@ -11,19 +11,19 @@ import pytest
 from scripts.criar_superadmin import criar_superadmin
 from scripts.revogar_sessao_superadmin import revogar_sessao_superadmin
 from sentinela.auth.login import autenticar
-from sentinela.db.pool import superadmin_scoped_connection
+from tests.sql_cru import executar
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_revogar_incrementa_token_version(pool):
+async def test_revogar_incrementa_token_version(db):
     from tests.integration.conftest_db import TEST_DATABASE_URL_ADMIN
 
     email = "revogar-teste@example.com"
     try:
         await criar_superadmin(TEST_DATABASE_URL_ADMIN, email, "senha-forte-revogar-1")
-        credenciais_antes = await autenticar(pool, email, "senha-forte-revogar-1")
+        credenciais_antes = await autenticar(db, email, "senha-forte-revogar-1")
         assert credenciais_antes["token_version"] == 1
 
         novo_tv = await revogar_sessao_superadmin(TEST_DATABASE_URL_ADMIN, email)
@@ -32,15 +32,15 @@ async def test_revogar_incrementa_token_version(pool):
         # a senha continua a mesma -- só o token_version mudou (login
         # ainda funciona, só que agora emite um "tv" novo, que invalida
         # qualquer JWT emitido ANTES da revogação).
-        credenciais_depois = await autenticar(pool, email, "senha-forte-revogar-1")
+        credenciais_depois = await autenticar(db, email, "senha-forte-revogar-1")
         assert credenciais_depois["token_version"] == 2
     finally:
-        async with superadmin_scoped_connection(pool) as conn:
-            await conn.execute("DELETE FROM superadmins WHERE email = $1", email)
+        async with db.superadmin_session() as conn:
+            await executar(conn, "DELETE FROM superadmins WHERE email = $1", email)
 
 
 @pytest.mark.asyncio
-async def test_revogar_email_inexistente_devolve_none(pool):
+async def test_revogar_email_inexistente_devolve_none(db):
     from tests.integration.conftest_db import TEST_DATABASE_URL_ADMIN
 
     resultado = await revogar_sessao_superadmin(TEST_DATABASE_URL_ADMIN, "nao-existe-nunca@example.com")
@@ -48,7 +48,7 @@ async def test_revogar_email_inexistente_devolve_none(pool):
 
 
 @pytest.mark.asyncio
-async def test_revogacoes_sucessivas_incrementam_a_cada_chamada(pool):
+async def test_revogacoes_sucessivas_incrementam_a_cada_chamada(db):
     from tests.integration.conftest_db import TEST_DATABASE_URL_ADMIN
 
     email = "revogar-sucessivo@example.com"
@@ -58,5 +58,5 @@ async def test_revogacoes_sucessivas_incrementam_a_cada_chamada(pool):
         tv2 = await revogar_sessao_superadmin(TEST_DATABASE_URL_ADMIN, email)
         assert tv2 == tv1 + 1
     finally:
-        async with superadmin_scoped_connection(pool) as conn:
-            await conn.execute("DELETE FROM superadmins WHERE email = $1", email)
+        async with db.superadmin_session() as conn:
+            await executar(conn, "DELETE FROM superadmins WHERE email = $1", email)

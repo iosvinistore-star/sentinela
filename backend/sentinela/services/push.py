@@ -29,7 +29,7 @@ import asyncio
 import json
 import logging
 
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.repositories.push import PushRepositorio
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def gerar_par_vapid() -> tuple[str, str]:
 # Inscrições
 # ---------------------------------------------------------------------------
 
-async def inscrever(conn, endpoint: str, p256dh: str, auth: str, aparelho: str | None,
+async def inscrever(sessao, endpoint: str, p256dh: str, auth: str, aparelho: str | None,
                     empresa_id=None, usuario_id=None, superadmin_id=None) -> dict:
     """Grava (ou renova) a inscrição de um aparelho.
 
@@ -91,47 +91,22 @@ async def inscrever(conn, endpoint: str, p256dh: str, auth: str, aparelho: str |
     novas. Sem o upsert, isso viraria linha duplicada e notificação em
     dobro -- ou erro de unicidade, dependendo da ordem.
     """
-    row = await conn.fetchrow(
-        """
-        INSERT INTO push_inscricoes (empresa_id, usuario_id, superadmin_id, endpoint,
-                                     chave_p256dh, chave_auth, aparelho)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (endpoint) DO UPDATE
-           SET chave_p256dh = EXCLUDED.chave_p256dh,
-               chave_auth   = EXCLUDED.chave_auth,
-               aparelho     = EXCLUDED.aparelho,
-               empresa_id   = EXCLUDED.empresa_id,
-               usuario_id   = EXCLUDED.usuario_id,
-               superadmin_id = EXCLUDED.superadmin_id,
-               falhas_seguidas = 0
-        RETURNING id, criada_em
-        """,
-        empresa_id, usuario_id, superadmin_id, endpoint, p256dh, auth, aparelho,
-    )
-    return {"id": str(row["id"]), "criada_em": row["criada_em"].isoformat()}
+    row = await PushRepositorio(sessao).upsert(endpoint, p256dh, auth, aparelho, empresa_id, usuario_id, superadmin_id)
+    return {"id": str(row.id), "criada_em": row.criada_em.isoformat()}
 
 
-async def cancelar(conn, endpoint: str) -> bool:
-    apagadas = await conn.execute("DELETE FROM push_inscricoes WHERE endpoint = $1", endpoint)
-    return apagadas.endswith(" 1")
+async def cancelar(sessao, endpoint: str) -> bool:
+    return await PushRepositorio(sessao).apagar_por_endpoint(endpoint) > 0
 
 
-async def listar_da_empresa(conn, empresa_id) -> list[dict]:
-    rows = await conn.fetch(
-        "SELECT id, aparelho, criada_em, usada_em FROM push_inscricoes WHERE empresa_id = $1 ORDER BY criada_em",
-        empresa_id,
-    )
+async def listar_da_empresa(sessao, empresa_id) -> list[dict]:
     return [
-        {"id": str(r["id"]), "aparelho": r["aparelho"],
-         "criada_em": r["criada_em"].isoformat(),
-         "usada_em": r["usada_em"].isoformat() if r["usada_em"] else None}
-        for r in rows
+        {"id": str(r.id), "aparelho": r.aparelho,
+         "criada_em": r.criada_em.isoformat(),
+         "usada_em": r.usada_em.isoformat() if r.usada_em else None}
+        for r in await PushRepositorio(sessao).listar_da_empresa(empresa_id)
     ]
 
-
-# ---------------------------------------------------------------------------
-# Envio
-# ---------------------------------------------------------------------------
 
 def _enviar_uma(settings, inscricao: dict, carga: dict) -> tuple[bool, int | None]:
     """Envio bloqueante de UMA notificação. Roda em thread (ver `_disparar`).
@@ -161,25 +136,17 @@ def _enviar_uma(settings, inscricao: dict, carga: dict) -> tuple[bool, int | Non
         return False, None
 
 
-async def _registrar_resultado(conn, inscricao_id, entregue: bool, status: int | None):
+async def _registrar_resultado(sessao, inscricao_id, entregue: bool, status: int | None):
+    repo = PushRepositorio(sessao)
     if entregue:
-        await conn.execute(
-            "UPDATE push_inscricoes SET usada_em = now(), falhas_seguidas = 0 WHERE id = $1", inscricao_id,
-        )
-        return
-    # 404/410: o serviço de push afirma que a inscrição não existe mais
-    # (app desinstalado, dados limpos). Insistir nunca vai funcionar.
-    if status in (404, 410):
-        await conn.execute("DELETE FROM push_inscricoes WHERE id = $1", inscricao_id)
-        return
-    await conn.execute(
-        "UPDATE push_inscricoes SET falhas_seguidas = falhas_seguidas + 1 WHERE id = $1", inscricao_id,
-    )
-    await conn.execute("DELETE FROM push_inscricoes WHERE id = $1 AND falhas_seguidas >= $2",
-                       inscricao_id, MAX_FALHAS)
+        await repo.marcar_entregue(inscricao_id)
+    elif status in (404, 410):
+        await repo.apagar(inscricao_id)
+    else:
+        await repo.registrar_falha(inscricao_id, MAX_FALHAS)
 
 
-async def notificar_empresa(pool, settings, empresa_id, carga: dict) -> int:
+async def notificar_empresa(db, settings, empresa_id, carga: dict) -> int:
     """Manda `carga` para todos os aparelhos inscritos da empresa.
 
     Usa conexão de superadmin própria (não a do chamador): o envio é
@@ -189,18 +156,20 @@ async def notificar_empresa(pool, settings, empresa_id, carga: dict) -> int:
     """
     if not configurado(settings):
         return 0
-    async with superadmin_scoped_connection(pool) as conn:
-        inscricoes = await conn.fetch(
-            "SELECT id, endpoint, chave_p256dh, chave_auth FROM push_inscricoes WHERE empresa_id = $1",
-            empresa_id,
-        )
-        if not inscricoes:
-            return 0
-        entregues = 0
-        for r in inscricoes:
-            entregue, status = await asyncio.to_thread(_enviar_uma, settings, dict(r), carga)
-            await _registrar_resultado(conn, r["id"], entregue, status)
-            entregues += int(entregue)
+    async with db.superadmin_session() as sessao:
+        inscricoes = await PushRepositorio(sessao).listar_para_envio(empresa_id)
+    if not inscricoes:
+        return 0
+    # Os envios (uma requisição HTTP por aparelho, a serviço de terceiros)
+    # acontecem FORA de qualquer sessão: não seguram conexão nem transação
+    # do banco enquanto a Apple/Google respondem.
+    resultados = [
+        (r["id"], *await asyncio.to_thread(_enviar_uma, settings, r, carga)) for r in inscricoes
+    ]
+    async with db.superadmin_session() as sessao:
+        for inscricao_id, entregue, status in resultados:
+            await _registrar_resultado(sessao, inscricao_id, entregue, status)
+    entregues = sum(int(entregue) for _, entregue, _ in resultados)
     return entregues
 
 
@@ -229,8 +198,8 @@ def agendar_alerta_incidente(empresa_id, incidente: dict) -> None:
     if severidade not in SEVERIDADES_QUE_NOTIFICAM:
         return
     settings = getattr(getattr(_app, "state", None), "settings", None)
-    pool = getattr(getattr(_app, "state", None), "pool", None)
-    if settings is None or pool is None or not configurado(settings):
+    db = getattr(getattr(_app, "state", None), "db", None)
+    if settings is None or db is None or not configurado(settings):
         return
 
     ataques = incidente.get("ataques") or []
@@ -250,7 +219,7 @@ def agendar_alerta_incidente(empresa_id, incidente: dict) -> None:
 
     async def _tarefa():
         try:
-            await notificar_empresa(pool, settings, empresa_id, carga)
+            await notificar_empresa(db, settings, empresa_id, carga)
         except Exception:  # noqa: BLE001
             log.warning("push: falha ao notificar incidente", exc_info=True)
 

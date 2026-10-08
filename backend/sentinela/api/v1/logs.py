@@ -39,7 +39,7 @@ async def analisar_log(
     # pode bloquear IP) -- VIEWER não pode. Retrofit de `exigir_login`
     # (que aceitava viewer) para `exigir_papel("admin", "analista")`.
     usuario: dict = Depends(exigir_papel("admin", "analista")),
-    conn=Depends(conexao_tenant),
+    sessao=Depends(conexao_tenant),
 ):
     if not 1 <= limite <= 100:
         raise HTTPException(status_code=422, detail="limite deve estar entre 1 e 100")
@@ -96,7 +96,7 @@ async def analisar_log(
     pode_bloquear = bloquear and usuario["papel"] == "admin"
 
     respostas = await responder_a_incidentes(
-        conn, usuario["empresa_id"], relatorio,
+        sessao, usuario["empresa_id"], relatorio,
         limite_ataques=limite,
         verificar_reputacao=verificar_reputacao,
         bloquear=pode_bloquear,

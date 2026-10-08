@@ -12,8 +12,8 @@ só que aqui verificamos redirects e fragmentos de HTML em vez de JSON.
 from unittest.mock import patch
 
 import pytest
+from tests.sql_cru import executar
 
-from sentinela.db.pool import superadmin_scoped_connection
 
 pytestmark = pytest.mark.integration
 
@@ -123,7 +123,7 @@ async def test_redefinir_senha_com_token_invalido_mostra_erro(client):
 
 
 @pytest.mark.asyncio
-async def test_desativar_usuario_derruba_sessao_web_ja_aberta(client, usuario_de_teste, pool):
+async def test_desativar_usuario_derruba_sessao_web_ja_aberta(client, usuario_de_teste, db):
     """Mesmo reforço em tempo real de test_usuarios_api.py, mas para o
     lado HTMX (SessaoInvalidaError, ver web/deps.py): rota protegida
     redireciona pro /login com a sessão encerrada, em vez de continuar
@@ -132,8 +132,8 @@ async def test_desativar_usuario_derruba_sessao_web_ja_aberta(client, usuario_de
     resp_antes = await client.get("/incidentes", follow_redirects=False)
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE usuarios SET ativo = false WHERE id = $1", usuario_de_teste["id"])
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE usuarios SET ativo = false WHERE id = $1", usuario_de_teste["id"])
 
     resp_depois = await client.get("/incidentes", follow_redirects=False)
     assert resp_depois.status_code == 303
@@ -155,7 +155,7 @@ async def test_minha_conta_sem_sessao_redireciona_para_login(client):
 
 
 @pytest.mark.asyncio
-async def test_desativar_usuario_derruba_get_minha_conta_ja_aberta(client, usuario_de_teste, pool):
+async def test_desativar_usuario_derruba_get_minha_conta_ja_aberta(client, usuario_de_teste, db):
     """
     Correção de bug encontrado em revisão crítica (2026-09, achado 6):
     GET /minha-conta (só leitura) dependia SÓ de `exigir_login_web`
@@ -171,8 +171,8 @@ async def test_desativar_usuario_derruba_get_minha_conta_ja_aberta(client, usuar
     resp_antes = await client.get("/minha-conta", follow_redirects=False)
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE usuarios SET ativo = false WHERE id = $1", usuario_de_teste["id"])
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE usuarios SET ativo = false WHERE id = $1", usuario_de_teste["id"])
 
     resp_depois = await client.get("/minha-conta", follow_redirects=False)
     assert resp_depois.status_code == 303
