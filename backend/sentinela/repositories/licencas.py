@@ -110,6 +110,9 @@ class LicencaRepositorio(RepositorioBase):
         linha = (await self.sessao.execute(stmt)).one_or_none()
         return dict(linha._mapping) if linha else None
 
+    async def atualizar_token_hash(self, licenca_id, token_hash: str) -> None:
+        await self._atualizar(licenca_id, token_hash=token_hash)
+
     async def status_da_licenca_do_agente(self, agente_id):
         """(status, expira_em) da licença cuja vaga o agente ocupa, ou None se não ocupa nenhuma."""
         stmt = (

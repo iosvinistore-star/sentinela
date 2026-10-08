@@ -21,12 +21,13 @@ em vez de rodar bcrypt.checkpw contra TODO agente cadastrado a cada
 heartbeat (o mesmo trade-off que uma API key de qualquer provedor --
 GitHub, Stripe -- faz).
 """
-import asyncio
+import logging
 import secrets
 
 import bcrypt
 
-from sentinela.auth.security import verificar_senha
+from sentinela.auth.cache_token import cache_tokens
+from sentinela.auth.security import hash_token, hash_token_e_rapido
 from sentinela.repositories.agentes import AgenteRepositorio
 
 PREFIXO_TOKEN = "agt"
@@ -74,9 +75,11 @@ async def autenticar_agente(db, token: str) -> dict | None:
     if prefixo is not None:
         async with db.superadmin_session() as sessao:
             agente = await AgenteRepositorio(sessao).buscar_ativo_por_prefixo(prefixo)
-    token_valido = await asyncio.to_thread(
-        verificar_senha, token, agente["token_hash"] if agente else _HASH_DUMMY
-    )
+    # `cache_tokens` evita o bcrypt quando este MESMO token já foi verificado contra o MESMO hash que está no banco
+    # agora (ver auth/cache_token.py); um token revogado nem chega aqui, porque a linha deixa de ser encontrada.
+    token_valido = await cache_tokens.verificar(token, agente["token_hash"] if agente else _HASH_DUMMY)
+    if agente and token_valido and not hash_token_e_rapido(agente["token_hash"]):
+        await _migrar_para_hash_rapido(db, agente["id"], token)
     if agente and token_valido:
         return {
             "agente_id": agente["id"],
@@ -84,3 +87,16 @@ async def autenticar_agente(db, token: str) -> dict | None:
             "hostname": agente["hostname"],
         }
     return None
+
+
+async def _migrar_para_hash_rapido(db, agente_id, token: str) -> None:
+    """
+    Token emitido antes do hash rápido (bcrypt): na primeira verificação bem-sucedida troca o hash guardado por
+    `sha256$...` (ver `auth.security.hash_token`), e os heartbeats seguintes deixam de pagar bcrypt. Melhor esforço:
+    falhar aqui nunca derruba a autenticação.
+    """
+    try:
+        async with db.superadmin_session() as sessao:
+            await AgenteRepositorio(sessao).atualizar_token_hash(agente_id, hash_token(token))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("não foi possível migrar o hash do token", exc_info=True)

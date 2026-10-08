@@ -69,6 +69,12 @@ class AgenteRepositorio(RepositorioBase):
         linha = (await self.sessao.execute(stmt)).one_or_none()
         return dict(linha._mapping) if linha else None
 
+    async def atualizar_token_hash(self, agente_id, token_hash: str) -> None:
+        await self.sessao.execute(
+            update(Agente).where(Agente.id == agente_id).values(token_hash=token_hash)
+            .execution_options(synchronize_session=False)
+        )
+
     async def esta_habilitado(self, agente_id, empresa_id) -> bool:
         stmt = select(Agente.habilitado).where(Agente.id == agente_id, Agente.empresa_id == empresa_id)
         return bool((await self.sessao.execute(stmt)).scalar_one_or_none())

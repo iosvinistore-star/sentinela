@@ -24,12 +24,13 @@ por `gerar_token()`; só o hash bcrypt do token INTEIRO fica no banco
 (`licencas.token_prefixo`, UNIQUE, indexado) só para tornar o lookup O(1) em
 vez de rodar bcrypt.checkpw contra TODA licença cadastrada a cada validação.
 """
-import asyncio
+import logging
 import secrets
 
 import bcrypt
 
-from sentinela.auth.security import verificar_senha
+from sentinela.auth.cache_token import cache_tokens
+from sentinela.auth.security import hash_token, hash_token_e_rapido
 from sentinela.repositories.licencas import LicencaRepositorio
 
 PREFIXO_TOKEN = "lic"
@@ -82,9 +83,11 @@ async def autenticar_licenca(db, token: str) -> dict | None:
     if prefixo is not None:
         async with db.superadmin_session() as sessao:
             licenca = await LicencaRepositorio(sessao).buscar_por_prefixo(prefixo)
-    token_valido = await asyncio.to_thread(
-        verificar_senha, token, licenca["token_hash"] if licenca else _HASH_DUMMY
-    )
+    # `cache_tokens` evita o bcrypt quando este MESMO token já foi verificado contra o MESMO hash que está no banco
+    # agora (ver auth/cache_token.py); um token revogado nem chega aqui, porque a linha deixa de ser encontrada.
+    token_valido = await cache_tokens.verificar(token, licenca["token_hash"] if licenca else _HASH_DUMMY)
+    if licenca and token_valido and not hash_token_e_rapido(licenca["token_hash"]):
+        await _migrar_para_hash_rapido(db, licenca["id"], token)
     if licenca and token_valido:
         return {
             "licenca_id": licenca["id"],
@@ -94,3 +97,16 @@ async def autenticar_licenca(db, token: str) -> dict | None:
             "expira_em": licenca["expira_em"],
         }
     return None
+
+
+async def _migrar_para_hash_rapido(db, licenca_id, token: str) -> None:
+    """
+    Token emitido antes do hash rápido (bcrypt): na primeira verificação bem-sucedida troca o hash guardado por
+    `sha256$...` (ver `auth.security.hash_token`), e os heartbeats seguintes deixam de pagar bcrypt. Melhor esforço:
+    falhar aqui nunca derruba a autenticação.
+    """
+    try:
+        async with db.superadmin_session() as sessao:
+            await LicencaRepositorio(sessao).atualizar_token_hash(licenca_id, hash_token(token))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("não foi possível migrar o hash do token", exc_info=True)

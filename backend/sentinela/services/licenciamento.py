@@ -16,10 +16,9 @@ com a ação); validações de alta frequência do Agent gravam em
 migration 0019 (não poluir o audit log administrativo com ruído de
 heartbeat).
 """
-import asyncio
 
 from sentinela.auth.licencas import gerar_token
-from sentinela.auth.security import hash_senha
+from sentinela.auth.security import hash_token
 from sentinela.repositories.licencas import LicencaRepositorio
 from sentinela.services import auditoria as servico_auditoria
 
@@ -94,7 +93,7 @@ async def criar_licenca(sessao, empresa_id, plano_id, expira_em=None,
     if not await repo.plano_ativo_existe(plano_id):
         raise PlanoInvalidoError("plano inválido ou inativo")
     token_completo, prefixo = gerar_token()
-    token_hash = await asyncio.to_thread(hash_senha, token_completo)
+    token_hash = hash_token(token_completo)
     row = await repo.criar(
         empresa_id=empresa_id, plano_id=plano_id, token_prefixo=prefixo, token_hash=token_hash,
         expira_em=expira_em, criado_por_usuario_id=ator_usuario_id, criado_por_superadmin_id=ator_superadmin_id,

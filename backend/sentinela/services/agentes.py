@@ -20,10 +20,9 @@ já existe para ataques de rede), mas nunca aciona firewall nem qualquer
 resposta automática local -- isso fica para uma fase futura, deliberadamente
 fora do escopo agora.
 """
-import asyncio
 
 from sentinela.auth.agentes import gerar_token
-from sentinela.auth.security import hash_senha
+from sentinela.auth.security import hash_token
 from sentinela.repositories.agentes import AgenteRepositorio
 from sentinela.repositories.licencas import LicencaRepositorio
 from sentinela.services import auditoria as servico_auditoria
@@ -151,7 +150,7 @@ async def criar_agente(sessao, empresa_id, hostname: str, ator_usuario_id=None):
     coluna na migration 0016), o predicado sempre bate para um INSERT.
     """
     token_completo, prefixo = gerar_token()
-    token_hash = await asyncio.to_thread(hash_senha, token_completo)
+    token_hash = hash_token(token_completo)
     row = await AgenteRepositorio(sessao).inserir_se_hostname_livre(
         empresa_id, hostname, prefixo, token_hash, ator_usuario_id
     )

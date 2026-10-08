@@ -573,3 +573,69 @@ async def test_heartbeat_ip_local_invalido_e_422(client, superadmin_de_teste, us
         headers={"X-Sentinela-Agent-Token": token},
     )
     assert resp_status.status_code == 200  # confirma que o token/agente continuam saudáveis
+
+
+def _corpo_heartbeat(hostname):
+    return {"hostname": hostname, "sistema_operacional": "linux", "versao_agente": "8.3.0",
+            "total_processos": 10, "processos_suspeitos": []}
+
+
+@pytest.mark.asyncio
+async def test_revogacao_vale_na_hora_apos_varios_heartbeats_aceitos(client, superadmin_de_teste, usuario_de_teste):
+    """A verificação do token não é cacheada às cegas: o lookup no banco continua a cada heartbeat, então revogar
+    um agente o derruba imediatamente -- sem esperar nenhum TTL."""
+    empresa_id = usuario_de_teste["empresa_id"]
+    await _habilitar_agentes_endpoint(client, superadmin_de_teste, empresa_id)
+    await logar(client, usuario_de_teste["email"], usuario_de_teste["senha"])
+    r = await client.post("/api/v1/agentes", json={"hostname": "srv-cache-revoga"}, headers={"X-Sentinela-CSRF": "1"})
+    token, agente_id = r.json()["token"], r.json()["agente"]["id"]
+    h = {"X-Sentinela-Agent-Token": token}
+
+    for _ in range(3):
+        assert (await client.post("/api/v1/agentes/heartbeat", json=_corpo_heartbeat("srv-cache-revoga"), headers=h)).status_code == 200
+
+    assert (await client.post(f"/api/v1/agentes/{agente_id}/revogar", headers={"X-Sentinela-CSRF": "1"})).status_code == 200
+    r = await client.post("/api/v1/agentes/heartbeat", json=_corpo_heartbeat("srv-cache-revoga"), headers=h)
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_token_errado_continua_401_com_o_cache_ligado(client, superadmin_de_teste, usuario_de_teste):
+    empresa_id = usuario_de_teste["empresa_id"]
+    await _habilitar_agentes_endpoint(client, superadmin_de_teste, empresa_id)
+    await logar(client, usuario_de_teste["email"], usuario_de_teste["senha"])
+    r = await client.post("/api/v1/agentes", json={"hostname": "srv-cache-errado"}, headers={"X-Sentinela-CSRF": "1"})
+    token = r.json()["token"]
+    adulterado = token[:-1] + ("A" if token[-1] != "A" else "B")
+    ok = await client.post("/api/v1/agentes/heartbeat", json=_corpo_heartbeat("srv-cache-errado"),
+                           headers={"X-Sentinela-Agent-Token": token})
+    assert ok.status_code == 200
+    ruim = await client.post("/api/v1/agentes/heartbeat", json=_corpo_heartbeat("srv-cache-errado"),
+                             headers={"X-Sentinela-Agent-Token": adulterado})
+    assert ruim.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_token_novo_usa_hash_rapido_e_token_legado_bcrypt_e_migrado(client, superadmin_de_teste, usuario_de_teste):
+    """Tokens novos nascem `sha256$` (sem bcrypt por heartbeat); um token antigo (bcrypt) continua valendo e é
+    migrado para `sha256$` na primeira verificação bem-sucedida."""
+    from sentinela.auth.security import hash_senha
+    from tests.sql_cru import executar
+
+    empresa_id = usuario_de_teste["empresa_id"]
+    await _habilitar_agentes_endpoint(client, superadmin_de_teste, empresa_id)
+    await logar(client, usuario_de_teste["email"], usuario_de_teste["senha"])
+    r = await client.post("/api/v1/agentes", json={"hostname": "srv-hash-legado"}, headers={"X-Sentinela-CSRF": "1"})
+    token, agente_id = r.json()["token"], r.json()["agente"]["id"]
+
+    db = client._transport.app.state.db
+    async with db.superadmin_session() as conn:
+        assert (await buscar_um(conn, "SELECT token_hash FROM agentes WHERE id = $1", agente_id))["token_hash"].startswith("sha256$")
+        # simula um agente emitido pela versão anterior
+        await executar(conn, "UPDATE agentes SET token_hash = $2 WHERE id = $1", agente_id, hash_senha(token))
+
+    h = {"X-Sentinela-Agent-Token": token}
+    for _ in range(2):
+        assert (await client.post("/api/v1/agentes/heartbeat", json=_corpo_heartbeat("srv-hash-legado"), headers=h)).status_code == 200
+    async with db.superadmin_session() as conn:
+        assert (await buscar_um(conn, "SELECT token_hash FROM agentes WHERE id = $1", agente_id))["token_hash"].startswith("sha256$")
