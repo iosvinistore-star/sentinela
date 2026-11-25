@@ -22,6 +22,7 @@ from tests.integration.conftest_db import (
     TEST_DATABASE_URL,
     TEST_DATABASE_URL_ADMIN,
 )
+from tests.sql_cru import executar
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -92,19 +93,17 @@ async def _resetar_rate_limiter_de_login(app_instance):
 
 
 @pytest_asyncio.fixture
-async def usuario_de_teste(pool, empresa_factory):
+async def usuario_de_teste(db, empresa_factory):
     """Cria uma empresa + um usuário admin com senha conhecida, pronto para logar via /api/v1/auth/login."""
     from sentinela.auth.security import hash_senha
-    from sentinela.db.pool import superadmin_scoped_connection
 
     empresa_id = await empresa_factory("Empresa API Teste")
     email = f"admin-{uuid.uuid4()}@example.com"
     senha = "senha-forte-123"
     usuario_id = uuid.uuid4()
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'admin', $4)",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'admin', $4)",
             usuario_id, empresa_id, email, hash_senha(senha),
         )
 
@@ -112,18 +111,16 @@ async def usuario_de_teste(pool, empresa_factory):
 
 
 @pytest_asyncio.fixture
-async def analista_de_teste(pool, empresa_factory):
+async def analista_de_teste(db, empresa_factory):
     from sentinela.auth.security import hash_senha
-    from sentinela.db.pool import superadmin_scoped_connection
 
     empresa_id = await empresa_factory("Empresa API Teste Analista")
     email = f"analista-{uuid.uuid4()}@example.com"
     senha = "senha-forte-123"
     usuario_id = uuid.uuid4()
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'analista', $4)",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'analista', $4)",
             usuario_id, empresa_id, email, hash_senha(senha),
         )
 
@@ -131,23 +128,21 @@ async def analista_de_teste(pool, empresa_factory):
 
 
 @pytest_asyncio.fixture
-async def superadmin_de_teste(pool):
+async def superadmin_de_teste(db):
     from sentinela.auth.security import hash_senha
-    from sentinela.db.pool import superadmin_scoped_connection
 
     email = f"superadmin-{uuid.uuid4()}@example.com"
     senha = "senha-forte-123"
     superadmin_id = uuid.uuid4()
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "INSERT INTO superadmins (id, email, senha_hash) VALUES ($1, $2, $3)",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "INSERT INTO superadmins (id, email, senha_hash) VALUES ($1, $2, $3)",
             superadmin_id, email, hash_senha(senha),
         )
 
     yield {"id": superadmin_id, "email": email, "senha": senha}
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         # Fase C -- login (e outras ações administrativas) agora grava
         # eventos de auditoria referenciando este superadmin
         # (`auditoria.ator_superadmin_id`, FK sem ON DELETE CASCADE de
@@ -159,9 +154,9 @@ async def superadmin_de_teste(pool):
         # DELETE abaixo violaria a FK sempre que o teste tiver feito login
         # (LOGIN_SUCCESS/LOGIN_FAILURE, ver api/v1/auth.py) ou qualquer
         # outra ação auditada com este superadmin como ator.
-        await conn.execute("DELETE FROM auditoria WHERE ator_superadmin_id = $1", superadmin_id)
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM superadmins WHERE id = $1", superadmin_id)
+        await executar(conn, "DELETE FROM auditoria WHERE ator_superadmin_id = $1", superadmin_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM superadmins WHERE id = $1", superadmin_id)
 
 
 async def logar(client: httpx.AsyncClient, email: str, senha: str) -> httpx.Response:

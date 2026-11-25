@@ -42,6 +42,31 @@ def validar_politica_senha(senha: str) -> None:
         raise ValueError(f"senha não pode ter mais de {SENHA_MAX_BYTES} bytes (evite muitos caracteres não-ASCII)")
 
 
+PREFIXO_HASH_TOKEN = "sha256$"
+
+
+def hash_token(token: str) -> str:
+    """
+    Hash de um TOKEN DE MÁQUINA (agente, licença): `sha256$<hex>`.
+
+    Tokens gerados pelo servidor têm 256 bits de entropia (`secrets.token_urlsafe(32)`): não há o que um
+    força bruta lenta como o bcrypt proteja -- o segredo não é adivinhável nem por dicionário. bcrypt existe
+    para SENHAS escolhidas por pessoas. Verificar o token a cada heartbeat com bcrypt custava ~0,3 s de CPU
+    e limitava o servidor a poucas centenas de agentes; o SHA-256 custa microssegundos. (Mesmo desenho de
+    chaves de API de provedores como GitHub e Stripe.)
+    """
+    return PREFIXO_HASH_TOKEN + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_token_e_rapido(token_hash: str) -> bool:
+    return token_hash.startswith(PREFIXO_HASH_TOKEN)
+
+
+def verificar_hash_token(token: str, token_hash: str) -> bool:
+    """Compara em tempo constante. Só para hashes `sha256$` (ver `hash_token`)."""
+    return secrets.compare_digest(hash_token(token), token_hash)
+
+
 def hash_senha(senha: str) -> str:
     return bcrypt.hashpw(senha.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 

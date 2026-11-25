@@ -39,7 +39,7 @@ async def analisar(
     duracao_bloqueio_horas: float = Form(24),
     # Fase C / C1 -- ver api/v1/logs.py:analisar_log (mesmo retrofit).
     usuario: dict = Depends(exigir_papel_web("admin", "analista")),
-    conn=Depends(conexao_tenant_web),
+    sessao=Depends(conexao_tenant_web),
 ):
     if not 1 <= limite <= 100:
         raise HTTPException(status_code=422, detail="limite deve estar entre 1 e 100")
@@ -86,7 +86,7 @@ async def analisar(
     pode_bloquear = bloquear and usuario["papel"] == "admin"
 
     respostas = await responder_a_incidentes(
-        conn, usuario["empresa_id"], relatorio,
+        sessao, usuario["empresa_id"], relatorio,
         limite_ataques=limite,
         verificar_reputacao=verificar_reputacao,
         bloquear=pode_bloquear,

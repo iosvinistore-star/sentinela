@@ -36,7 +36,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from sentinela.core.limites_upload import LimiteUploadExcedidoError, LimitadorUploads, mensagem_amigavel  # noqa: F401
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.repositories.limites import LimiteTentativaRepositorio, LimiteUploadRepositorio
 
 _PROBABILIDADE_LIMPEZA = 0.01  # 1 em 100 chamadas -- barato o bastante para nunca precisar de um cron dedicado.
 
@@ -53,19 +53,17 @@ class LimitadorTentativasCompartilhado:
     para o porquê de fixa em vez de deslizante).
     """
 
-    def __init__(self, pool, max_tentativas: int = 5, janela_segundos: float = 300,
+    def __init__(self, db, max_tentativas: int = 5, janela_segundos: float = 300,
                  bloqueio_segundos: float = 300, agora=_agora_utc):
-        self._pool = pool
+        self._pool = db
         self._max_tentativas = max_tentativas
         self._janela_segundos = janela_segundos
         self._bloqueio_segundos = bloqueio_segundos
         self._agora = agora
 
     async def tempo_restante_bloqueio(self, chave: str) -> float:
-        async with superadmin_scoped_connection(self._pool) as conn:
-            bloqueado_ate = await conn.fetchval(
-                "SELECT bloqueado_ate FROM limite_tentativas WHERE chave = $1", chave
-            )
+        async with self._pool.superadmin_session() as sessao:
+            bloqueado_ate = await LimiteTentativaRepositorio(sessao).bloqueado_ate(chave)
         if bloqueado_ate is None:
             return 0.0
         restante = (bloqueado_ate - self._agora()).total_seconds()
@@ -76,7 +74,7 @@ class LimitadorTentativasCompartilhado:
         Um único UPSERT atômico decide, na hora, se a janela atual do lado
         de fora do banco já expirou (reseta pra 1) ou incrementa -- o lock
         de linha que o `INSERT ... ON CONFLICT` já toma sozinho (mantido
-        até o fim da transação, que `superadmin_scoped_connection` abre)
+        até o fim da transação, que `Database.superadmin_session` abre)
         serializa duas chamadas concorrentes para a MESMA chave sem
         precisar de um lock explícito (`SELECT ... FOR UPDATE` não serviria
         aqui -- a linha pode nem existir ainda na primeira falha desta
@@ -85,27 +83,15 @@ class LimitadorTentativasCompartilhado:
         agora = self._agora()
         inicio_janela_valida = agora - timedelta(seconds=self._janela_segundos)
 
-        async with superadmin_scoped_connection(self._pool) as conn:
-            linha = await conn.fetchrow(
-                """
-                INSERT INTO limite_tentativas AS lt (chave, janela_inicio, contador, bloqueado_ate)
-                VALUES ($1, $2, 1, NULL)
-                ON CONFLICT (chave) DO UPDATE SET
-                    janela_inicio = CASE WHEN lt.janela_inicio <= $3 THEN $2 ELSE lt.janela_inicio END,
-                    contador = CASE WHEN lt.janela_inicio <= $3 THEN 1 ELSE lt.contador + 1 END
-                RETURNING contador
-                """,
-                chave, agora, inicio_janela_valida,
-            )
+        async with self._pool.superadmin_session() as sessao:
+            repo = LimiteTentativaRepositorio(sessao)
+            contador, _ = await repo.contar_tentativa(chave, agora, inicio_janela_valida)
             bloqueado_ate = None
-            if linha["contador"] >= self._max_tentativas:
+            if contador >= self._max_tentativas:
                 bloqueado_ate = agora + timedelta(seconds=self._bloqueio_segundos)
-                await conn.execute(
-                    "UPDATE limite_tentativas SET bloqueado_ate = $2, contador = 0 WHERE chave = $1",
-                    chave, bloqueado_ate,
-                )
+                await repo.bloquear(chave, bloqueado_ate)
             if random.random() < _PROBABILIDADE_LIMPEZA:
-                await self._limpar_antigas_sem_conexao_nova(conn, agora)
+                await self._limpar_antigas_sem_conexao_nova(sessao, agora)
 
         return self._bloqueio_segundos if bloqueado_ate is not None else 0.0
 
@@ -146,20 +132,10 @@ class LimitadorTentativasCompartilhado:
         agora = self._agora()
         inicio_janela_valida = agora - timedelta(seconds=self._janela_segundos)
 
-        async with superadmin_scoped_connection(self._pool) as conn:
-            linha = await conn.fetchrow(
-                """
-                INSERT INTO limite_tentativas AS lt (chave, janela_inicio, contador, bloqueado_ate)
-                VALUES ($1, $2, 1, NULL)
-                ON CONFLICT (chave) DO UPDATE SET
-                    janela_inicio = CASE WHEN lt.janela_inicio <= $3 THEN $2 ELSE lt.janela_inicio END,
-                    contador = CASE WHEN lt.janela_inicio <= $3 THEN 1 ELSE lt.contador + 1 END
-                RETURNING contador, bloqueado_ate
-                """,
-                chave, agora, inicio_janela_valida,
-            )
+        async with self._pool.superadmin_session() as sessao:
+            repo = LimiteTentativaRepositorio(sessao)
+            contador, bloqueado_ate_existente = await repo.contar_tentativa(chave, agora, inicio_janela_valida)
 
-            bloqueado_ate_existente = linha["bloqueado_ate"]
             if bloqueado_ate_existente is not None and bloqueado_ate_existente > agora:
                 # Já bloqueado por uma reserva anterior (ou pré-existente) --
                 # rejeita esta tentativa antes de qualquer auth rodar, sem
@@ -169,22 +145,19 @@ class LimitadorTentativasCompartilhado:
                 # e o próximo INSERT depois disso reseta a janela do zero
                 # normalmente).
                 if random.random() < _PROBABILIDADE_LIMPEZA:
-                    await self._limpar_antigas_sem_conexao_nova(conn, agora)
+                    await self._limpar_antigas_sem_conexao_nova(sessao, agora)
                 return max((bloqueado_ate_existente - agora).total_seconds(), 0.0)
 
-            if linha["contador"] >= self._max_tentativas:
+            if contador >= self._max_tentativas:
                 # Esta reserva é a que CRUZA o limite -- ainda deixa passar
                 # (retorna 0.0), mas já grava o bloqueio para que a PRÓXIMA
                 # chamada (concorrente ou sequencial) veja bloqueado_ate no
                 # futuro e seja rejeitada acima.
                 novo_bloqueado_ate = agora + timedelta(seconds=self._bloqueio_segundos)
-                await conn.execute(
-                    "UPDATE limite_tentativas SET bloqueado_ate = $2, contador = 0 WHERE chave = $1",
-                    chave, novo_bloqueado_ate,
-                )
+                await repo.bloquear(chave, novo_bloqueado_ate)
 
             if random.random() < _PROBABILIDADE_LIMPEZA:
-                await self._limpar_antigas_sem_conexao_nova(conn, agora)
+                await self._limpar_antigas_sem_conexao_nova(sessao, agora)
 
         return 0.0
 
@@ -202,18 +175,14 @@ class LimitadorTentativasCompartilhado:
         acumuladas por um flood atrás do mesmo IP. Um bloqueio já ativo
         (`bloqueado_ate`) não é desfeito.
         """
-        async with superadmin_scoped_connection(self._pool) as conn:
-            await conn.execute(
-                """UPDATE limite_tentativas SET contador = GREATEST(contador - 1, 0)
-                    WHERE chave = $1 AND (bloqueado_ate IS NULL OR bloqueado_ate <= $2)""",
-                chave, self._agora(),
-            )
+        async with self._pool.superadmin_session() as sessao:
+            await LimiteTentativaRepositorio(sessao).devolver(chave, self._agora())
 
     async def registrar_sucesso(self, chave: str) -> None:
-        async with superadmin_scoped_connection(self._pool) as conn:
-            await conn.execute("DELETE FROM limite_tentativas WHERE chave = $1", chave)
+        async with self._pool.superadmin_session() as sessao:
+            await LimiteTentativaRepositorio(sessao).remover(chave)
 
-    async def _limpar_antigas_sem_conexao_nova(self, conn, agora):
+    async def _limpar_antigas_sem_conexao_nova(self, sessao, agora):
         """
         Chamada com baixa probabilidade de dentro de `registrar_falha` --
         mesmo raciocínio do teto de memória do `LimitadorTentativas`
@@ -224,15 +193,13 @@ class LimitadorTentativasCompartilhado:
         relevante.
         """
         limite = agora - timedelta(seconds=self._janela_segundos)
-        await conn.execute(
-            "DELETE FROM limite_tentativas WHERE bloqueado_ate IS NULL AND janela_inicio <= $1", limite
-        )
+        await LimiteTentativaRepositorio(sessao).limpar_expiradas(limite)
 
     async def limpar_tudo_para_teste(self) -> None:
         """Só para a suíte de testes (ver tests/api/conftest_api.py) -- zera
         o estado compartilhado entre testes que reusam a mesma app/pool."""
-        async with superadmin_scoped_connection(self._pool) as conn:
-            await conn.execute("DELETE FROM limite_tentativas")
+        async with self._pool.superadmin_session() as sessao:
+            await LimiteTentativaRepositorio(sessao).limpar_tudo()
 
 
 class LimitadorUploadsCompartilhado:
@@ -255,7 +222,7 @@ class LimitadorUploadsCompartilhado:
 
     def __init__(
         self,
-        pool,
+        db,
         teto_bytes_por_usuario: int = 50 * 1024 * 1024,
         janela_usuario_segundos: float = 3600,
         teto_bytes_por_empresa: int = 300 * 1024 * 1024,
@@ -263,7 +230,7 @@ class LimitadorUploadsCompartilhado:
         max_concorrentes: int = 4,
         agora=_agora_utc,
     ):
-        self._pool = pool
+        self._pool = db
         self._teto_usuario = teto_bytes_por_usuario
         self._janela_usuario = janela_usuario_segundos
         self._teto_empresa = teto_bytes_por_empresa
@@ -280,7 +247,7 @@ class LimitadorUploadsCompartilhado:
         chave_empresa = f"empresa:{empresa_id}"
         agora = self._agora()
 
-        async with superadmin_scoped_connection(self._pool) as conn:
+        async with self._pool.superadmin_session() as sessao:
             # pg_advisory_xact_lock: sem isto, duas requisições concorrentes
             # do MESMO usuário (ou da mesma empresa) fariam cada uma sua
             # própria SELECT SUM ANTES de qualquer uma commitar o INSERT --
@@ -291,37 +258,27 @@ class LimitadorUploadsCompartilhado:
             # evitava, só que aquele serializava TODO upload do processo
             # inteiro, de qualquer usuário/empresa -- este lock é só para a
             # MESMA chave, liberado automaticamente no fim da transação).
-            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", chave_usuario)
-            usados_usuario = await self._somar_janela(conn, chave_usuario, agora, self._janela_usuario)
+            repo = LimiteUploadRepositorio(sessao)
+            await repo.travar(chave_usuario)
+            usados_usuario = await self._somar_janela(repo, chave_usuario, agora, self._janela_usuario)
             if usados_usuario + tamanho_bytes > self._teto_usuario:
                 raise LimiteUploadExcedidoError("volume_usuario", self._janela_usuario)
 
-            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", chave_empresa)
-            usados_empresa = await self._somar_janela(conn, chave_empresa, agora, self._janela_empresa)
+            await repo.travar(chave_empresa)
+            usados_empresa = await self._somar_janela(repo, chave_empresa, agora, self._janela_empresa)
             if usados_empresa + tamanho_bytes > self._teto_empresa:
                 raise LimiteUploadExcedidoError("volume_empresa", self._janela_empresa)
 
-            await conn.execute(
-                """
-                INSERT INTO limite_upload_eventos (chave, ocorrido_em, bytes)
-                VALUES ($1, $3, $4), ($2, $3, $4)
-                """,
-                chave_usuario, chave_empresa, agora, tamanho_bytes,
-            )
+            await repo.registrar([chave_usuario, chave_empresa], agora, tamanho_bytes)
 
             if random.random() < _PROBABILIDADE_LIMPEZA:
                 limite_geral = agora - timedelta(seconds=max(self._janela_usuario, self._janela_empresa))
-                await conn.execute("DELETE FROM limite_upload_eventos WHERE ocorrido_em <= $1", limite_geral)
+                await repo.limpar_antigos(limite_geral)
 
-    async def _somar_janela(self, conn, chave, agora, janela_segundos) -> int:
-        limite = agora - timedelta(seconds=janela_segundos)
-        total = await conn.fetchval(
-            "SELECT COALESCE(SUM(bytes), 0) FROM limite_upload_eventos WHERE chave = $1 AND ocorrido_em > $2",
-            chave, limite,
-        )
-        return int(total)
+    async def _somar_janela(self, repo, chave, agora, janela_segundos) -> int:
+        return await repo.somar_janela(chave, agora - timedelta(seconds=janela_segundos))
 
     async def limpar_tudo_para_teste(self) -> None:
         """Só para testes -- ver `LimitadorTentativasCompartilhado.limpar_tudo_para_teste`."""
-        async with superadmin_scoped_connection(self._pool) as conn:
-            await conn.execute("DELETE FROM limite_upload_eventos")
+        async with self._pool.superadmin_session() as sessao:
+            await LimiteUploadRepositorio(sessao).limpar_tudo()

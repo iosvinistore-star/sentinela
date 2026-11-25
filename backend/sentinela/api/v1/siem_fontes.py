@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from sentinela.auth.dependencies import conexao_tenant, exigir_csrf_header, exigir_papel
+from sentinela.services import siem as servico_siem
 
 router = APIRouter(prefix="/siem/fontes", tags=["siem-fontes"])
 
@@ -20,30 +21,25 @@ class FonteSIEMRequest(BaseModel):
     ativo: bool = True
 
 @router.get("")
-async def listar_fontes(usuario: dict = Depends(exigir_papel("admin", "analista")), conn=Depends(conexao_tenant)):
-    rows = await conn.fetch("""SELECT id,nome,tipo,configuracao,ativo,criado_em FROM siem_fontes WHERE empresa_id=$1 ORDER BY nome""", usuario["empresa_id"])
-    return [dict(r) for r in rows]
+async def listar_fontes(usuario: dict = Depends(exigir_papel("admin", "analista")), sessao=Depends(conexao_tenant)):
+    return await servico_siem.listar_fontes(sessao, usuario["empresa_id"])
 
 @router.post("", dependencies=[Depends(exigir_csrf_header)])
-async def criar_fonte(dados: FonteSIEMRequest, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
+async def criar_fonte(dados: FonteSIEMRequest, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
     try:
-        row = await conn.fetchrow("""INSERT INTO siem_fontes(empresa_id,nome,tipo,configuracao,ativo) VALUES($1,$2,$3,$4::jsonb,$5) RETURNING id,nome,tipo,configuracao,ativo,criado_em""", usuario["empresa_id"], dados.nome, dados.tipo.lower(), __import__("json").dumps(dados.configuracao), dados.ativo)
-    except Exception as exc:
-        if "uq_siem_fontes_tenant_nome" in str(exc) or "duplicate key" in str(exc).lower():
-            raise HTTPException(status_code=409, detail="já existe uma fonte com este nome nesta empresa") from exc
-        raise
-    return dict(row)
+        return await servico_siem.criar_fonte(sessao, usuario["empresa_id"], dados.nome, dados.tipo, dados.configuracao, dados.ativo)
+    except servico_siem.FonteSiemDuplicadaError as exc:
+        raise HTTPException(status_code=409, detail="já existe uma fonte com este nome nesta empresa") from exc
 
 @router.patch("/{fonte_id}", dependencies=[Depends(exigir_csrf_header)])
-async def atualizar_fonte(fonte_id: int, dados: FonteSIEMRequest, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    row = await conn.fetchrow("""UPDATE siem_fontes SET nome=$3,tipo=$4,configuracao=$5::jsonb,ativo=$6 WHERE empresa_id=$1 AND id=$2 RETURNING id,nome,tipo,configuracao,ativo,criado_em""", usuario["empresa_id"], fonte_id, dados.nome, dados.tipo.lower(), __import__("json").dumps(dados.configuracao), dados.ativo)
-    if not row:
+async def atualizar_fonte(fonte_id: int, dados: FonteSIEMRequest, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    fonte = await servico_siem.atualizar_fonte(sessao, usuario["empresa_id"], fonte_id, dados.nome, dados.tipo, dados.configuracao, dados.ativo)
+    if not fonte:
         raise HTTPException(status_code=404, detail="fonte não encontrada")
-    return dict(row)
+    return fonte
 
 @router.delete("/{fonte_id}", dependencies=[Depends(exigir_csrf_header)])
-async def excluir_fonte(fonte_id: int, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    result = await conn.execute("DELETE FROM siem_fontes WHERE empresa_id=$1 AND id=$2", usuario["empresa_id"], fonte_id)
-    if result == "DELETE 0":
+async def excluir_fonte(fonte_id: int, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    if not await servico_siem.excluir_fonte(sessao, usuario["empresa_id"], fonte_id):
         raise HTTPException(status_code=404, detail="fonte não encontrada")
     return {"status": "ok"}

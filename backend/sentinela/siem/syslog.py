@@ -46,7 +46,7 @@ class _Protocol:
         logger.info("SIEM Syslog UDP encerrado")
 
 
-async def iniciar_syslog_udp(pool):
+async def iniciar_syslog_udp(db):
     if os.getenv("SENTINELA_SYSLOG_UDP_ENABLED", "false").lower() != "true":
         return None
     # Listener desligado por padrão (SENTINELA_SYSLOG_UDP_ENABLED); quando ligado
@@ -64,7 +64,7 @@ async def iniciar_syslog_udp(pool):
     batch_size = int(os.getenv("SENTINELA_SIEM_BATCH_SIZE", "500"))
     flush_ms = int(os.getenv("SENTINELA_SIEM_FLUSH_MS", "100"))
     max_queue = int(os.getenv("SENTINELA_SIEM_MAX_QUEUE", "20000"))
-    batcher = SIEMBatcher(pool, batch_size=batch_size, flush_interval=flush_ms / 1000, max_queue=max_queue)
+    batcher = SIEMBatcher(db, batch_size=batch_size, flush_interval=flush_ms / 1000, max_queue=max_queue)
     await batcher.start()
 
     import asyncio

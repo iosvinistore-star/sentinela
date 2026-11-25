@@ -68,13 +68,13 @@ async def config_push(request: Request, usuario: dict = Depends(exigir_login)):
 
 @router.post("/inscricoes", dependencies=[Depends(exigir_csrf_header)], status_code=201)
 async def inscrever(dados: InscricaoRequest, request: Request,
-                    usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
+                    usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
     if not servico_push.configurado(request.app.state.settings):
         raise HTTPException(status_code=503, detail="notificação não configurada neste servidor")
     if not _endpoint_aceitavel(dados.endpoint):
         raise HTTPException(status_code=422, detail="endpoint de notificação inválido")
     criada = await servico_push.inscrever(
-        conn, dados.endpoint, dados.p256dh, dados.auth, dados.aparelho,
+        sessao, dados.endpoint, dados.p256dh, dados.auth, dados.aparelho,
         empresa_id=usuario["empresa_id"], usuario_id=usuario["sub"],
     )
     return {"inscricao": criada}
@@ -82,14 +82,14 @@ async def inscrever(dados: InscricaoRequest, request: Request,
 
 @router.delete("/inscricoes", dependencies=[Depends(exigir_csrf_header)])
 async def cancelar(dados: CancelarRequest, usuario: dict = Depends(exigir_login),
-                   conn=Depends(conexao_tenant)):
+                   sessao=Depends(conexao_tenant)):
     # A RLS já garante que só some inscrição da própria empresa.
-    return {"removida": await servico_push.cancelar(conn, dados.endpoint)}
+    return {"removida": await servico_push.cancelar(sessao, dados.endpoint)}
 
 
 @router.get("/inscricoes")
-async def listar(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return {"aparelhos": await servico_push.listar_da_empresa(conn, usuario["empresa_id"])}
+async def listar(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return {"aparelhos": await servico_push.listar_da_empresa(sessao, usuario["empresa_id"])}
 
 
 @router.post("/teste", dependencies=[Depends(exigir_csrf_header)])
@@ -104,7 +104,7 @@ async def enviar_teste(request: Request, usuario: dict = Depends(exigir_login)):
     if not servico_push.configurado(settings):
         raise HTTPException(status_code=503, detail="notificação não configurada neste servidor")
     entregues = await servico_push.notificar_empresa(
-        request.app.state.pool, settings, usuario["empresa_id"],
+        request.app.state.db, settings, usuario["empresa_id"],
         {"titulo": "Sentinela SOC", "corpo": "Notificação de teste — está funcionando.",
          "gravidade": "INFO", "tag": "teste", "url": "/app/"},
     )

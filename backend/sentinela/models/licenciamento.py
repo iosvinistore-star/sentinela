@@ -7,7 +7,7 @@
 
 import datetime
 import uuid
-from typing import Optional
+from typing import ClassVar, Optional
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKeyConstraint, Index, PrimaryKeyConstraint, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -18,6 +18,7 @@ from sentinela.database.base import Base
 
 class Licenca(Base):
     __tablename__ = "licencas"
+    _sensiveis: ClassVar[frozenset[str]] = frozenset({"token_hash"})
     __table_args__ = (
         CheckConstraint("status = ANY (ARRAY['ativa'::text, 'suspensa'::text, 'expirada'::text, 'revogada'::text])", name="licencas_status_check"),
         ForeignKeyConstraint(["criado_por_superadmin_id"], ["superadmins.id"], name="licencas_criado_por_superadmin_id_fkey"),

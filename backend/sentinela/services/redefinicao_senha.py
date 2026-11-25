@@ -25,6 +25,8 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import literal, select
+
 from sentinela.auth.security import hash_senha, validar_politica_senha
 from sentinela.core.email import enviar_email
 from sentinela.repositories.redefinicao_senha import RedefinicaoSenhaRepositorio
@@ -56,7 +58,7 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-async def solicitar_redefinicao(pool, email: str, url_base: str) -> asyncio.Task | None:
+async def solicitar_redefinicao(db, email: str, url_base: str) -> asyncio.Task | None:
     """
     Devolve a `asyncio.Task` do envio de email em segundo plano (só para
     quem quiser aguardá-la explicitamente -- ver tests/integration/
@@ -93,11 +95,11 @@ async def solicitar_redefinicao(pool, email: str, url_base: str) -> asyncio.Task
        mitigação de defesa em profundidade, na mesma linha do resto deste
        projeto, não uma prova formal.
     """
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         usuario_id = await UsuarioRepositorio(sessao).obter_id_ativo_por_email(email)
         if usuario_id is None:
             logger.info("Pedido de redefinição de senha para email não cadastrado (ou inativo): %s", email)
-            await sessao.fetchval("SELECT 1")
+            await sessao.execute(select(literal(1)))
             return None
 
         token = secrets.token_urlsafe(32)
@@ -117,7 +119,7 @@ async def solicitar_redefinicao(pool, email: str, url_base: str) -> asyncio.Task
     )
 
 
-async def confirmar_redefinicao(pool, token: str, senha_nova: str) -> bool:
+async def confirmar_redefinicao(db, token: str, senha_nova: str) -> bool:
     """True se o token era válido (existe, não expirou, não foi usado
     ainda) e a senha foi trocada; False caso contrário.
 
@@ -129,7 +131,7 @@ async def confirmar_redefinicao(pool, token: str, senha_nova: str) -> bool:
     independentemente de quem chama."""
     validar_politica_senha(senha_nova)
     token_hash = _hash_token(token)
-    async with pool.superadmin_session() as sessao:
+    async with db.superadmin_session() as sessao:
         repo = RedefinicaoSenhaRepositorio(sessao)
         # Atômico de propósito -- a versão antiga fazia um SELECT (checava
         # usado_em/expira_em em Python) e só DEPOIS um UPDATE separado

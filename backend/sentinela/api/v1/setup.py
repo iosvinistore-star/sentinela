@@ -32,7 +32,6 @@ import ipaddress
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from sentinela.db.pool import superadmin_scoped_connection
 from sentinela.services import auditoria as servico_auditoria
 from sentinela.services import superadmins as servico_superadmins
 
@@ -47,8 +46,8 @@ async def conexao_setup(request: Request):
     descritas no topo do módulo são o que substitui a autenticação aqui;
     nenhuma rota fora deste módulo pode usar esta dependência.
     """
-    async with superadmin_scoped_connection(request.app.state.pool) as conn:
-        yield conn
+    async with request.app.state.db.superadmin_session() as sessao:
+        yield sessao
 
 # Chave arbitrária mas fixa do advisory lock ("SENT" em ASCII). Só precisa
 # não colidir com outro lock do próprio sistema -- ver
@@ -64,8 +63,8 @@ class PrimeiroAcessoRequest(BaseModel):
     token_setup: str | None = Field(default=None, max_length=200)
 
 
-async def _ja_configurado(conn) -> bool:
-    return bool(await conn.fetchval("SELECT EXISTS (SELECT 1 FROM superadmins)"))
+async def _ja_configurado(sessao) -> bool:
+    return await servico_superadmins.existe_algum_superadmin(sessao)
 
 
 def _origem_loopback(request: Request) -> bool:
@@ -97,11 +96,11 @@ def _token_confere(request: Request, informado: str | None) -> bool:
 
 
 @router.get("/status")
-async def status_setup(request: Request, conn=Depends(conexao_setup)):
+async def status_setup(request: Request, sessao=Depends(conexao_setup)):
     """Quem a tela de login chama para saber se deve mandar o usuário para
     /primeiro-acesso. Não revela nada além do fato de haver ou não uma
     conta de gestão -- que é observável de qualquer forma."""
-    configurado = await _ja_configurado(conn)
+    configurado = await _ja_configurado(sessao)
     return {
         "configurado": configurado,
         "precisa_configurar": not configurado,
@@ -111,9 +110,9 @@ async def status_setup(request: Request, conn=Depends(conexao_setup)):
 
 
 @router.post("/primeiro-acesso", status_code=201)
-async def primeiro_acesso(dados: PrimeiroAcessoRequest, request: Request, conn=Depends(conexao_setup)):
+async def primeiro_acesso(dados: PrimeiroAcessoRequest, request: Request, sessao=Depends(conexao_setup)):
     """Cria a primeira conta de gestão (SAAS_OWNER) da plataforma."""
-    if await _ja_configurado(conn):
+    if await _ja_configurado(sessao):
         raise HTTPException(status_code=409, detail="a plataforma já está configurada -- use a tela de login")
     if not _origem_loopback(request) and not _token_confere(request, dados.token_setup):
         raise HTTPException(
@@ -121,22 +120,22 @@ async def primeiro_acesso(dados: PrimeiroAcessoRequest, request: Request, conn=D
             detail="primeiro acesso remoto exige o token de instalação (SENTINELA_SETUP_TOKEN)",
         )
 
-    async with conn.transaction():
+    async with sessao.begin_nested():
         # Serializa contra outra requisição simultânea; o lock cai junto
         # com a transação.
-        await conn.execute("SELECT pg_advisory_xact_lock($1)", _LOCK_PRIMEIRO_ACESSO)
-        if await _ja_configurado(conn):
+        await servico_superadmins.travar_primeiro_acesso(sessao, _LOCK_PRIMEIRO_ACESSO)
+        if await _ja_configurado(sessao):
             raise HTTPException(status_code=409, detail="a plataforma já está configurada -- use a tela de login")
         try:
             conta = await servico_superadmins.criar_saas_admin(
-                conn, dados.email, dados.senha, "saas_owner", ator_superadmin_id=None,
+                sessao, dados.email, dados.senha, "saas_owner", ator_superadmin_id=None,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if conta is None:  # pragma: no cover -- impossível com a tabela vazia
             raise HTTPException(status_code=409, detail="já existe uma conta com este e-mail")
         await servico_auditoria.registrar_evento(
-            conn, None, "plataforma.primeiro_acesso",
+            sessao, None, "plataforma.primeiro_acesso",
             {"email": conta["email"], "origem": "loopback" if _origem_loopback(request) else "token"},
             ator_superadmin_id=conta["id"],
         )

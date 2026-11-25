@@ -23,7 +23,6 @@ from sentinela.auth.dependencies import (
 )
 from sentinela.auth.login import ContaEmpresaInativaError, autenticar
 from sentinela.auth.security import decodificar_token_sessao, emitir_token_sessao
-from sentinela.db.pool import tenant_scoped_connection, superadmin_scoped_connection
 from sentinela.services import mfa as servico_mfa
 from sentinela.services import refresh_tokens as servico_refresh
 from sentinela.services import redefinicao_senha as servico_redefinicao
@@ -98,7 +97,7 @@ async def formulario_login(request: Request, proxima: str = "/", erro: str | Non
 @router.post("/login")
 async def submeter_login(request: Request, email: str = Form(...), senha: str = Form(...), proxima: str = Form("/")):
     settings = request.app.state.settings
-    pool = request.app.state.pool
+    db = request.app.state.db
     limitador = request.app.state.limitador_login
     chave = f"login:{obter_ip_cliente(request, request.app.state.settings.proxies_confiaveis)}"
 
@@ -111,7 +110,7 @@ async def submeter_login(request: Request, email: str = Form(...), senha: str = 
         )
 
     try:
-        credenciais = await autenticar(pool, email, senha)
+        credenciais = await autenticar(db, email, senha)
     except ContaEmpresaInativaError as exc:
         await limitador.registrar_sucesso(chave)  # senha certa -- não é força bruta
         return templates.TemplateResponse(
@@ -166,8 +165,8 @@ async def submeter_login(request: Request, email: str = Form(...), senha: str = 
         destino = "/"
     resposta = RedirectResponse(destino, status_code=303)
     resposta.set_cookie(value=token, **_cookie_kwargs(settings))
-    async with superadmin_scoped_connection(pool) as conn_refresh:
-        refresh, _ = await servico_refresh.criar(conn_refresh, credenciais["tipo"], credenciais["id"], credenciais["token_version"])
+    async with db.superadmin_session() as sessao_refresh:
+        refresh, _ = await servico_refresh.criar(sessao_refresh, credenciais["tipo"], credenciais["id"], credenciais["token_version"])
     resposta.set_cookie(value=refresh, **_refresh_cookie_kwargs(settings))
     return resposta
 
@@ -184,7 +183,7 @@ async def submeter_mfa_login(
     formulário de MFA -- ver docstring de `mfa_verificar` (api/v1/auth.py)
     para o mesmo raciocínio de segurança do token intermediário."""
     settings = request.app.state.settings
-    pool = request.app.state.pool
+    db = request.app.state.db
 
     try:
         pre_auth = decodificar_token_sessao(pre_auth_token, settings.jwt_secret)
@@ -213,14 +212,14 @@ async def submeter_mfa_login(
         )
 
     if pre_auth.get("papel") == "superadmin":
-        async with superadmin_scoped_connection(pool) as conn:
+        async with db.superadmin_session() as sessao:
             ok = await servico_mfa.verificar_no_login_superadmin(
-                conn, settings.mfa_encryption_key, usuario_id, codigo=codigo or None, recovery_code=recovery_code or None,
+                sessao, settings.mfa_encryption_key, usuario_id, codigo=codigo or None, recovery_code=recovery_code or None,
             )
     else:
-        async with tenant_scoped_connection(pool, empresa_id) as conn:
+        async with db.tenant_session(empresa_id) as sessao:
             ok = await servico_mfa.verificar_no_login(
-                conn, settings.mfa_encryption_key, empresa_id, usuario_id, codigo=codigo or None, recovery_code=recovery_code or None,
+                sessao, settings.mfa_encryption_key, empresa_id, usuario_id, codigo=codigo or None, recovery_code=recovery_code or None,
             )
     if not ok:
         return templates.TemplateResponse(
@@ -238,8 +237,8 @@ async def submeter_mfa_login(
         destino = "/"
     resposta = RedirectResponse(destino, status_code=303)
     resposta.set_cookie(value=token, **_cookie_kwargs(settings))
-    async with superadmin_scoped_connection(pool) as conn_refresh:
-        refresh, _ = await servico_refresh.criar(conn_refresh, "superadmin" if payload.get("papel") == "superadmin" else "usuario", payload["sub"], payload["tv"])
+    async with db.superadmin_session() as sessao_refresh:
+        refresh, _ = await servico_refresh.criar(sessao_refresh, "superadmin" if payload.get("papel") == "superadmin" else "usuario", payload["sub"], payload["tv"])
     resposta.set_cookie(value=refresh, **_refresh_cookie_kwargs(settings))
     return resposta
 
@@ -285,11 +284,11 @@ async def submeter_esqueci_senha(request: Request, email: str = Form(...)):
             {"usuario": None, "enviado": False, "erro": f"Muitas tentativas. Tente de novo em {int(restante) + 1} segundos."},
         )
 
-    pool = request.app.state.pool
+    db = request.app.state.db
     # Mesma lógica de api/v1/auth.py:esqueci_senha -- prefere a URL pública
     # fixa, só cai para o Host (client-controlled) fora de produção.
     url_base = request.app.state.settings.url_base_publica or str(request.base_url)
-    await servico_redefinicao.solicitar_redefinicao(pool, email, url_base)
+    await servico_redefinicao.solicitar_redefinicao(db, email, url_base)
     return templates.TemplateResponse(request, "esqueci_senha.html", {"usuario": None, "enviado": True})
 
 
@@ -319,8 +318,8 @@ async def submeter_redefinir_senha(request: Request, token: str = Form(...), sen
             request, "redefinir_senha.html",
             {"usuario": None, "token": token, "erro": "A senha não pode ter mais de 72 caracteres.", "sucesso": False},
         )
-    pool = request.app.state.pool
-    ok = await servico_redefinicao.confirmar_redefinicao(pool, token, senha_nova)
+    db = request.app.state.db
+    ok = await servico_redefinicao.confirmar_redefinicao(db, token, senha_nova)
     if not ok:
         return templates.TemplateResponse(
             request, "redefinir_senha.html",

@@ -14,20 +14,19 @@ import json
 import pyotp
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar, buscar_um, executar
 
 pytestmark = pytest.mark.integration
 
 
-async def _auditoria_da_empresa(pool, empresa_id):
+async def _auditoria_da_empresa(db, empresa_id):
     """asyncpg devolve `jsonb` como string crua (nenhum codec jsonb é
     registrado no pool, ver db/pool.py) -- por isso `json.loads` aqui, ao
     contrário de `services/auditoria.py:_publico`, que expõe `detalhes` tal
     como veio (a API HTTP serializa de volta para JSON de qualquer jeito)."""
-    async with superadmin_scoped_connection(pool) as conn:
-        linhas = await conn.fetch(
-            "SELECT acao, detalhes FROM auditoria WHERE empresa_id = $1 ORDER BY criado_em", empresa_id,
+    async with db.superadmin_session() as conn:
+        linhas = await buscar(conn, "SELECT acao, detalhes FROM auditoria WHERE empresa_id = $1 ORDER BY criado_em", empresa_id,
         )
     return [{"acao": linha["acao"], "detalhes": json.loads(linha["detalhes"]) if linha["detalhes"] else {}} for linha in linhas]
 
@@ -66,7 +65,7 @@ async def test_setup_gera_uri_de_provisionamento_mas_nao_ativa_mfa_ainda(client,
 
 
 @pytest.mark.asyncio
-async def test_confirmar_com_codigo_correto_ativa_mfa_e_devolve_recovery_codes(client, usuario_de_teste, pool):
+async def test_confirmar_com_codigo_correto_ativa_mfa_e_devolve_recovery_codes(client, usuario_de_teste, db):
     segredo, recovery_codes = await _habilitar_mfa(client, usuario_de_teste)
     assert len(recovery_codes) == 10
 
@@ -77,7 +76,7 @@ async def test_confirmar_com_codigo_correto_ativa_mfa_e_devolve_recovery_codes(c
     resp = await client.post("/api/v1/auth/login", json={"email": usuario_de_teste["email"], "senha": usuario_de_teste["senha"]})
     assert resp.json()["mfa_necessario"] is True
 
-    eventos = await _auditoria_da_empresa(pool, usuario_de_teste["empresa_id"])
+    eventos = await _auditoria_da_empresa(db, usuario_de_teste["empresa_id"])
     assert "MFA_ENABLED" in {e["acao"] for e in eventos}
 
 
@@ -161,7 +160,7 @@ async def test_login_mfa_verificar_rate_limitado_por_usuario(client, usuario_de_
 
 
 @pytest.mark.asyncio
-async def test_recovery_code_autentica_login_e_e_de_uso_unico(client, usuario_de_teste, pool):
+async def test_recovery_code_autentica_login_e_e_de_uso_unico(client, usuario_de_teste, db):
     segredo, recovery_codes = await _habilitar_mfa(client, usuario_de_teste)
     codigo_recovery = recovery_codes[0]
 
@@ -171,7 +170,7 @@ async def test_recovery_code_autentica_login_e_e_de_uso_unico(client, usuario_de
         "/api/v1/auth/mfa/verificar", json={"pre_auth_token": pre_auth_token, "recovery_code": codigo_recovery},
     )
     assert resp_verify.status_code == 200
-    eventos = await _auditoria_da_empresa(pool, usuario_de_teste["empresa_id"])
+    eventos = await _auditoria_da_empresa(db, usuario_de_teste["empresa_id"])
     assert "RECOVERY_CODE_USED" in {e["acao"] for e in eventos}
 
     # Reusar o MESMO recovery code numa segunda tentativa de login -- recusado.
@@ -200,7 +199,7 @@ async def test_recovery_code_invalido_e_recusado(client, usuario_de_teste):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_desativar_mfa_exige_codigo_valido(client, usuario_de_teste, pool):
+async def test_desativar_mfa_exige_codigo_valido(client, usuario_de_teste, db):
     segredo, _ = await _habilitar_mfa(client, usuario_de_teste)
     resp_login = await client.post("/api/v1/auth/login", json={"email": usuario_de_teste["email"], "senha": usuario_de_teste["senha"]})
     pre_auth_token = resp_login.json()["pre_auth_token"]
@@ -218,7 +217,7 @@ async def test_desativar_mfa_exige_codigo_valido(client, usuario_de_teste, pool)
 
     status = await client.get("/api/v1/usuarios/me/mfa/status")
     assert status.json()["mfa_habilitado"] is False
-    eventos = await _auditoria_da_empresa(pool, usuario_de_teste["empresa_id"])
+    eventos = await _auditoria_da_empresa(db, usuario_de_teste["empresa_id"])
     assert "MFA_DISABLED" in {e["acao"] for e in eventos}
 
 
@@ -239,7 +238,7 @@ async def test_desativar_mfa_sem_codigo_valido_e_recusado(client, usuario_de_tes
 
 
 @pytest.mark.asyncio
-async def test_regenerar_recovery_codes_invalida_os_antigos(client, usuario_de_teste, pool):
+async def test_regenerar_recovery_codes_invalida_os_antigos(client, usuario_de_teste, db):
     segredo, recovery_codes_antigos = await _habilitar_mfa(client, usuario_de_teste)
     resp_login = await client.post("/api/v1/auth/login", json={"email": usuario_de_teste["email"], "senha": usuario_de_teste["senha"]})
     pre_auth_token = resp_login.json()["pre_auth_token"]
@@ -254,7 +253,7 @@ async def test_regenerar_recovery_codes_invalida_os_antigos(client, usuario_de_t
     novos = resp_regen.json()["recovery_codes"]
     assert set(novos) != set(recovery_codes_antigos)
 
-    eventos = await _auditoria_da_empresa(pool, usuario_de_teste["empresa_id"])
+    eventos = await _auditoria_da_empresa(db, usuario_de_teste["empresa_id"])
     assert "RECOVERY_CODES_REGENERATED" in {e["acao"] for e in eventos}
 
     # Um recovery code ANTIGO não deve mais funcionar num login.
@@ -273,24 +272,22 @@ async def test_regenerar_recovery_codes_invalida_os_antigos(client, usuario_de_t
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_admin_pode_resetar_mfa_de_usuario_da_propria_empresa(client, pool, empresa_factory):
+async def test_admin_pode_resetar_mfa_de_usuario_da_propria_empresa(client, db, empresa_factory):
     from sentinela.auth.security import hash_senha
     import uuid
 
     empresa_id = await empresa_factory("Empresa MFA Reset")
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         admin_id = uuid.uuid4()
         analista_id = uuid.uuid4()
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'admin', $4)",
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'admin', $4)",
             admin_id, empresa_id, f"admin-{uuid.uuid4()}@example.com", hash_senha("senha-forte-123"),
         )
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'analista', $4)",
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'analista', $4)",
             analista_id, empresa_id, f"analista-{uuid.uuid4()}@example.com", hash_senha("senha-forte-123"),
         )
-        admin = dict(await conn.fetchrow("SELECT id, email FROM usuarios WHERE id = $1", admin_id))
-        analista = dict(await conn.fetchrow("SELECT id, email FROM usuarios WHERE id = $1", analista_id))
+        admin = dict(await buscar_um(conn, "SELECT id, email FROM usuarios WHERE id = $1", admin_id))
+        analista = dict(await buscar_um(conn, "SELECT id, email FROM usuarios WHERE id = $1", analista_id))
 
     await _habilitar_mfa(client, {"email": analista["email"], "senha": "senha-forte-123"})
     await logar(client, admin["email"], "senha-forte-123")
@@ -298,32 +295,30 @@ async def test_admin_pode_resetar_mfa_de_usuario_da_propria_empresa(client, pool
     resp_reset = await client.post(f"/api/v1/usuarios/{analista_id}/mfa/reset", headers={"X-Sentinela-CSRF": "1"})
     assert resp_reset.status_code == 200
 
-    eventos = await _auditoria_da_empresa(pool, empresa_id)
+    eventos = await _auditoria_da_empresa(db, empresa_id)
     evento_reset = next(e for e in eventos if e["acao"] == "MFA_RESET")
     assert evento_reset["detalhes"]["usuario_alvo_id"] == str(analista_id)
     assert evento_reset["detalhes"]["ator_usuario_id"] == str(admin_id)
 
 
 @pytest.mark.asyncio
-async def test_analista_nao_pode_resetar_mfa_de_outro_usuario(client, pool, empresa_factory):
+async def test_analista_nao_pode_resetar_mfa_de_outro_usuario(client, db, empresa_factory):
     """C1/C2 -- 'mfa.reset_others' não está na matriz de SECURITY_ANALYST."""
     import uuid
 
     from sentinela.auth.security import hash_senha
 
     empresa_id = await empresa_factory("Empresa MFA Reset Negado")
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         analista_ator_id = uuid.uuid4()
         alvo_id = uuid.uuid4()
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'analista', $4)",
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'analista', $4)",
             analista_ator_id, empresa_id, f"analista-ator-{uuid.uuid4()}@example.com", hash_senha("senha-forte-123"),
         )
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'viewer', $4)",
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, 'viewer', $4)",
             alvo_id, empresa_id, f"viewer-alvo-{uuid.uuid4()}@example.com", hash_senha("senha-forte-123"),
         )
-        analista_ator = dict(await conn.fetchrow("SELECT email FROM usuarios WHERE id = $1", analista_ator_id))
+        analista_ator = dict(await buscar_um(conn, "SELECT email FROM usuarios WHERE id = $1", analista_ator_id))
 
     await logar(client, analista_ator["email"], "senha-forte-123")
     resp = await client.post(f"/api/v1/usuarios/{alvo_id}/mfa/reset", headers={"X-Sentinela-CSRF": "1"})

@@ -99,7 +99,7 @@ class SiemFonte(Base):
         ForeignKeyConstraint(["empresa_id"], ["empresas.id"], ondelete="CASCADE", name="siem_fontes_empresa_id_fkey"),
         PrimaryKeyConstraint("id", name="siem_fontes_pkey"),
         Index("idx_siem_fontes_tenant_tipo", "empresa_id", "tipo"),
-        Index("uq_siem_fontes_tenant_nome", "empresa_id", unique=True),
+        Index("uq_siem_fontes_tenant_nome", "empresa_id", text("lower(nome)"), unique=True),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

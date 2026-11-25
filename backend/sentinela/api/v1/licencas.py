@@ -43,8 +43,8 @@ def _status_para_http(status_licenca: str) -> None:
 
 
 @router.post("/activate")
-async def activate(licenca: dict = Depends(licenca_atual), conn=Depends(conexao_tenant_licenca)):
-    resultado = await servico.ativar_licenca(conn, licenca)
+async def activate(licenca: dict = Depends(licenca_atual), sessao=Depends(conexao_tenant_licenca)):
+    resultado = await servico.ativar_licenca(sessao, licenca)
     if resultado is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
     _status_para_http(resultado["status"])
@@ -52,8 +52,8 @@ async def activate(licenca: dict = Depends(licenca_atual), conn=Depends(conexao_
 
 
 @router.post("/validate")
-async def validate(licenca: dict = Depends(licenca_atual), conn=Depends(conexao_tenant_licenca)):
-    resultado = await servico.validar_licenca(conn, licenca)
+async def validate(licenca: dict = Depends(licenca_atual), sessao=Depends(conexao_tenant_licenca)):
+    resultado = await servico.validar_licenca(sessao, licenca)
     if resultado is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
     _status_para_http(resultado["status"])
@@ -61,22 +61,22 @@ async def validate(licenca: dict = Depends(licenca_atual), conn=Depends(conexao_
 
 
 @router.post("/deactivate")
-async def deactivate(licenca: dict = Depends(licenca_atual), conn=Depends(conexao_tenant_licenca)):
+async def deactivate(licenca: dict = Depends(licenca_atual), sessao=Depends(conexao_tenant_licenca)):
     """Best-effort -- nunca falha por causa do status da licença (ver
     ARQUITETURA_LICENCIAMENTO.md §5): mesmo uma licença já suspensa/revogada
     pode (e deve) aceitar um aviso de desinstalação do agente."""
-    resultado = await servico.desativar_licenca(conn, licenca)
+    resultado = await servico.desativar_licenca(sessao, licenca)
     if resultado is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
     return {"licenca": resultado}
 
 
 @router.get("/status")
-async def status(licenca: dict = Depends(licenca_atual), conn=Depends(conexao_tenant_licenca)):
+async def status(licenca: dict = Depends(licenca_atual), sessao=Depends(conexao_tenant_licenca)):
     """Leitura pontual, sem side-effect -- devolve o status tal como está,
     inclusive não-'ativa' (o Agent decide o que fazer; não é papel desta
     rota de inspeção levantar 403)."""
-    resultado = await servico.obter_status_licenca(conn, licenca)
+    resultado = await servico.obter_status_licenca(sessao, licenca)
     if resultado is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
     return {"licenca": resultado}
@@ -96,26 +96,26 @@ class RenovarLicencaRequest(BaseModel):
 
 
 @admin_router.get("/planos")
-async def listar_planos(su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
-    return {"planos": await servico.listar_planos(conn)}
+async def listar_planos(su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
+    return {"planos": await servico.listar_planos(sessao)}
 
 
 @admin_router.get("/empresas/{empresa_id}/licencas")
 async def listar_licencas_da_empresa(empresa_id: uuid.UUID, su: dict = Depends(exigir_superadmin),
-                                       conn=Depends(conexao_superadmin)):
-    if await servico_empresas.obter_empresa(conn, str(empresa_id)) is None:
+                                       sessao=Depends(conexao_superadmin)):
+    if await servico_empresas.obter_empresa(sessao, str(empresa_id)) is None:
         raise HTTPException(status_code=404, detail="empresa não encontrada")
-    return {"licencas": await servico.listar_licencas(conn)}
+    return {"licencas": await servico.listar_licencas(sessao)}
 
 
 @admin_router.post("/empresas/{empresa_id}/licencas", dependencies=[Depends(exigir_csrf_header)])
 async def criar_licenca_da_empresa(empresa_id: uuid.UUID, dados: CriarLicencaRequest,
-                                     su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
-    if await servico_empresas.obter_empresa(conn, str(empresa_id)) is None:
+                                     su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
+    if await servico_empresas.obter_empresa(sessao, str(empresa_id)) is None:
         raise HTTPException(status_code=404, detail="empresa não encontrada")
     try:
         licenca, token = await servico.criar_licenca(
-            conn, str(empresa_id), str(dados.plano_id), expira_em=dados.expira_em, ator_superadmin_id=su["sub"],
+            sessao, str(empresa_id), str(dados.plano_id), expira_em=dados.expira_em, ator_superadmin_id=su["sub"],
         )
     except PlanoInvalidoError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -130,11 +130,11 @@ async def suspender_licenca(licenca_id: uuid.UUID,
                               # EXCLUSIVA de SaaS Owner (não de qualquer superadmin
                               # / SaaS Admin). Ver auth/rbac.py:exigir_saas_owner.
                               su: dict = Depends(exigir_saas_owner),
-                              conn=Depends(conexao_superadmin)):
-    licenca_atual_ = await conn.fetchrow("SELECT empresa_id FROM licencas WHERE id = $1", licenca_id)
-    if licenca_atual_ is None:
+                              sessao=Depends(conexao_superadmin)):
+    empresa_id = await servico.obter_empresa_da_licenca(sessao, licenca_id)
+    if empresa_id is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
-    resultado = await servico.suspender_licenca(conn, licenca_atual_["empresa_id"], licenca_id, ator_superadmin_id=su["sub"])
+    resultado = await servico.suspender_licenca(sessao, empresa_id, licenca_id, ator_superadmin_id=su["sub"])
     return {"licenca": resultado}
 
 
@@ -142,23 +142,23 @@ async def suspender_licenca(licenca_id: uuid.UUID,
 async def revogar_licenca(licenca_id: uuid.UUID,
                             # Fase C / C4 -- ver suspender_licenca acima (mesmo motivo).
                             su: dict = Depends(exigir_saas_owner),
-                            conn=Depends(conexao_superadmin)):
-    licenca_atual_ = await conn.fetchrow("SELECT empresa_id FROM licencas WHERE id = $1", licenca_id)
-    if licenca_atual_ is None:
+                            sessao=Depends(conexao_superadmin)):
+    empresa_id = await servico.obter_empresa_da_licenca(sessao, licenca_id)
+    if empresa_id is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
-    resultado = await servico.revogar_licenca(conn, licenca_atual_["empresa_id"], licenca_id, ator_superadmin_id=su["sub"])
+    resultado = await servico.revogar_licenca(sessao, empresa_id, licenca_id, ator_superadmin_id=su["sub"])
     return {"licenca": resultado}
 
 
 @admin_router.post("/licencas/{licenca_id}/renovar", dependencies=[Depends(exigir_csrf_header)])
 async def renovar_licenca(licenca_id: uuid.UUID, dados: RenovarLicencaRequest,
-                            su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
-    licenca_atual_ = await conn.fetchrow("SELECT empresa_id FROM licencas WHERE id = $1", licenca_id)
-    if licenca_atual_ is None:
+                            su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
+    empresa_id = await servico.obter_empresa_da_licenca(sessao, licenca_id)
+    if empresa_id is None:
         raise HTTPException(status_code=404, detail="licença não encontrada")
     try:
         resultado = await servico.renovar_licenca(
-            conn, licenca_atual_["empresa_id"], licenca_id, nova_expiracao=dados.nova_expiracao, ator_superadmin_id=su["sub"],
+            sessao, empresa_id, licenca_id, nova_expiracao=dados.nova_expiracao, ator_superadmin_id=su["sub"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

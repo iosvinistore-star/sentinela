@@ -11,5 +11,5 @@ from sentinela.services.dashboard import obter_dashboard
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 @router.get("")
-async def dashboard(usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    return await obter_dashboard(conn, usuario["empresa_id"])
+async def dashboard(usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    return await obter_dashboard(sessao, usuario["empresa_id"])

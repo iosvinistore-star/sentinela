@@ -16,9 +16,9 @@ import base64
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
 from sentinela.services import push as servico_push
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar, valor
 
 CSRF = {"X-Sentinela-CSRF": "1"}
 
@@ -43,7 +43,7 @@ def test_par_vapid_e_valido_e_diferente_a_cada_chamada():
 
 
 @pytest.mark.asyncio
-async def test_inscreve_reinscreve_e_cancela(client, usuario_de_teste, app_instance, pool):
+async def test_inscreve_reinscreve_e_cancela(client, usuario_de_teste, app_instance, db):
     settings = app_instance.state.settings
     pub, priv = servico_push.gerar_par_vapid()
     settings.vapid_public_key, settings.vapid_private_key = pub, priv
@@ -107,7 +107,7 @@ async def test_sem_chaves_o_recurso_some_sem_quebrar(client, usuario_de_teste, a
 
 
 @pytest.mark.asyncio
-async def test_inscricao_isolada_por_empresa(client, usuario_de_teste, superadmin_de_teste, app_instance, pool):
+async def test_inscricao_isolada_por_empresa(client, usuario_de_teste, superadmin_de_teste, app_instance, db):
     """RLS: o aparelho de uma empresa não pode aparecer para outra."""
     settings = app_instance.state.settings
     settings.vapid_public_key, settings.vapid_private_key = servico_push.gerar_par_vapid()
@@ -117,18 +117,17 @@ async def test_inscricao_isolada_por_empresa(client, usuario_de_teste, superadmi
             "endpoint": "https://fcm.googleapis.com/fcm/send/isolado-1",
             "p256dh": _chave_falsa(), "auth": _chave_falsa(16)})
 
-        async with superadmin_scoped_connection(pool) as conn:
-            outra = await conn.fetchval(
-                "INSERT INTO empresas (nome, plano) VALUES ('Outra Push', 'padrao') RETURNING id")
-        async with tenant_scoped_connection(pool, outra) as conn:
-            vistos = await conn.fetch("SELECT endpoint FROM push_inscricoes")
+        async with db.superadmin_session() as conn:
+            outra = await valor(conn, "INSERT INTO empresas (nome, plano) VALUES ('Outra Push', 'padrao') RETURNING id")
+        async with db.tenant_session(outra) as conn:
+            vistos = await buscar(conn, "SELECT endpoint FROM push_inscricoes")
         assert vistos == []
     finally:
         settings.vapid_public_key, settings.vapid_private_key = "", ""
 
 
 @pytest.mark.asyncio
-async def test_falha_no_envio_nao_impede_o_incidente(pool, usuario_de_teste, monkeypatch):
+async def test_falha_no_envio_nao_impede_o_incidente(db, usuario_de_teste, monkeypatch):
     """O ponto mais importante do módulo: a notificação é um extra. Um
     incidente que deixou de ser gravado porque o serviço de push estava
     fora do ar seria um defeito muito pior do que um alerta perdido."""
@@ -139,7 +138,7 @@ async def test_falha_no_envio_nao_impede_o_incidente(pool, usuario_de_teste, mon
 
     monkeypatch.setattr(servico_push, "agendar_alerta_incidente", explode)
     empresa_id = usuario_de_teste["empresa_id"]
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         with pytest.raises(RuntimeError):
             # Confirma que o monkeypatch está mesmo no caminho...
             servico_push.agendar_alerta_incidente(empresa_id, {"severidade": "CRITICAL"})
@@ -149,7 +148,7 @@ async def test_falha_no_envio_nao_impede_o_incidente(pool, usuario_de_teste, mon
         return None
 
     monkeypatch.setattr(servico_push, "agendar_alerta_incidente", silencioso)
-    async with tenant_scoped_connection(pool, empresa_id) as conn:
+    async with db.tenant_session(empresa_id) as conn:
         criado = await servico_incidentes.criar_incidente(
             conn, empresa_id, "203.0.113.77", {"severity": "CRITICAL", "score": 99}, ["forca_bruta"])
     assert criado is not None and criado["severidade"] == "CRITICAL"

@@ -36,8 +36,8 @@ import pytest_asyncio
 
 from sentinela.auth.dependencies import NOME_COOKIE_SESSAO
 from sentinela.auth.security import emitir_token_sessao, hash_senha
-from sentinela.db.pool import superadmin_scoped_connection
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar_um, executar, valor
 
 pytestmark = pytest.mark.integration
 
@@ -46,45 +46,43 @@ pytestmark = pytest.mark.integration
 # Fixtures: dois tenants completos e independentes.
 # ---------------------------------------------------------------------------
 
-async def _criar_usuario(pool, empresa_id, papel, senha="senha-forte-123"):
+async def _criar_usuario(db, empresa_id, papel, senha="senha-forte-123"):
     email = f"{papel}-{uuid.uuid4()}@example.com"
     usuario_id = uuid.uuid4()
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, $4, $5)",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "INSERT INTO usuarios (id, empresa_id, email, papel, senha_hash) VALUES ($1, $2, $3, $4, $5)",
             usuario_id, empresa_id, email, papel, hash_senha(senha),
         )
     return {"id": usuario_id, "empresa_id": empresa_id, "email": email, "senha": senha, "papel": papel}
 
 
 @pytest_asyncio.fixture
-async def tenant_a(pool, empresa_factory):
+async def tenant_a(db, empresa_factory):
     empresa_id = await empresa_factory("Tenant A -- Isolamento")
     return {
         "empresa_id": empresa_id,
-        "admin": await _criar_usuario(pool, empresa_id, "admin"),
-        "analista": await _criar_usuario(pool, empresa_id, "analista"),
+        "admin": await _criar_usuario(db, empresa_id, "admin"),
+        "analista": await _criar_usuario(db, empresa_id, "analista"),
         # Fase C -- RBAC de 5 papéis (ver auth/rbac.py).
-        "viewer": await _criar_usuario(pool, empresa_id, "viewer"),
+        "viewer": await _criar_usuario(db, empresa_id, "viewer"),
     }
 
 
 @pytest_asyncio.fixture
-async def tenant_b(pool, empresa_factory):
+async def tenant_b(db, empresa_factory):
     empresa_id = await empresa_factory("Tenant B -- Isolamento")
     return {
         "empresa_id": empresa_id,
-        "admin": await _criar_usuario(pool, empresa_id, "admin"),
-        "analista": await _criar_usuario(pool, empresa_id, "analista"),
-        "viewer": await _criar_usuario(pool, empresa_id, "viewer"),
+        "admin": await _criar_usuario(db, empresa_id, "admin"),
+        "analista": await _criar_usuario(db, empresa_id, "analista"),
+        "viewer": await _criar_usuario(db, empresa_id, "viewer"),
     }
 
 
-async def _criar_incidente(pool, empresa_id, ip, incident_id=None):
+async def _criar_incidente(db, empresa_id, ip, incident_id=None):
     incident_id = incident_id or f"INC-ISOL-{uuid.uuid4().hex[:12]}"
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            """
+    async with db.superadmin_session() as conn:
+        await executar(conn, """
             INSERT INTO incidentes (empresa_id, incident_id, ip, severidade, pontuacao_risco, ataques)
             VALUES ($1, $2, $3, 'HIGH', 75, '["SQL Injection (SQLi)"]'::jsonb)
             """,
@@ -93,15 +91,14 @@ async def _criar_incidente(pool, empresa_id, ip, incident_id=None):
     return incident_id
 
 
-async def _criar_bloqueio_direto(pool, empresa_id, ip, usuario_id=None):
+async def _criar_bloqueio_direto(db, empresa_id, ip, usuario_id=None):
     """Insere direto na tabela -- sem passar por core.firewall/ipset (ver
     services/firewall.py:registrar_bloqueio) -- porque o que este arquivo
     testa é isolamento de DADOS por tenant, não o kernel de firewall em si
     (isso já é coberto por tests/unit/test_firewall_kernel.py e
     tests/api/test_firewall_api.py)."""
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            """
+    async with db.superadmin_session() as conn:
+        await executar(conn, """
             INSERT INTO bloqueios_firewall (empresa_id, ip, motivo, origem, status, criado_por_usuario_id)
             VALUES ($1, $2, 'teste de isolamento', 'api', 'ativo', $3)
             """,
@@ -109,16 +106,15 @@ async def _criar_bloqueio_direto(pool, empresa_id, ip, usuario_id=None):
         )
 
 
-async def _status_bloqueio(pool, empresa_id, ip):
-    async with superadmin_scoped_connection(pool) as conn:
-        return await conn.fetchval(
-            "SELECT status FROM bloqueios_firewall WHERE empresa_id = $1 AND ip = $2", empresa_id, ip,
+async def _status_bloqueio(db, empresa_id, ip):
+    async with db.superadmin_session() as conn:
+        return await valor(conn, "SELECT status FROM bloqueios_firewall WHERE empresa_id = $1 AND ip = $2", empresa_id, ip,
         )
 
 
-async def _papel_e_ativo(pool, usuario_id):
-    async with superadmin_scoped_connection(pool) as conn:
-        row = await conn.fetchrow("SELECT papel, ativo FROM usuarios WHERE id = $1", usuario_id)
+async def _papel_e_ativo(db, usuario_id):
+    async with db.superadmin_session() as conn:
+        row = await buscar_um(conn, "SELECT papel, ativo FROM usuarios WHERE id = $1", usuario_id)
     return dict(row)
 
 
@@ -137,8 +133,8 @@ def _forjar_cookie_sessao(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_api_listar_incidentes_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, pool):
-    incident_id_a = await _criar_incidente(pool, tenant_a["empresa_id"], "203.0.113.201")
+async def test_api_listar_incidentes_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, db):
+    incident_id_a = await _criar_incidente(db, tenant_a["empresa_id"], "203.0.113.201")
     await logar(client, tenant_b["admin"]["email"], tenant_b["admin"]["senha"])
 
     resp = await client.get("/api/v1/incidentes")
@@ -147,8 +143,8 @@ async def test_api_listar_incidentes_nao_vaza_de_outra_empresa(client, tenant_a,
 
 
 @pytest.mark.asyncio
-async def test_api_obter_incidente_de_outra_empresa_e_404(client, tenant_a, tenant_b, pool):
-    incident_id_a = await _criar_incidente(pool, tenant_a["empresa_id"], "203.0.113.202")
+async def test_api_obter_incidente_de_outra_empresa_e_404(client, tenant_a, tenant_b, db):
+    incident_id_a = await _criar_incidente(db, tenant_a["empresa_id"], "203.0.113.202")
     await logar(client, tenant_b["admin"]["email"], tenant_b["admin"]["senha"])
 
     resp = await client.get(f"/api/v1/incidentes/{incident_id_a}")
@@ -156,8 +152,8 @@ async def test_api_obter_incidente_de_outra_empresa_e_404(client, tenant_a, tena
 
 
 @pytest.mark.asyncio
-async def test_api_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(client, tenant_a, tenant_b, pool):
-    incident_id_a = await _criar_incidente(pool, tenant_a["empresa_id"], "203.0.113.203")
+async def test_api_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(client, tenant_a, tenant_b, db):
+    incident_id_a = await _criar_incidente(db, tenant_a["empresa_id"], "203.0.113.203")
     await logar(client, tenant_b["admin"]["email"], tenant_b["admin"]["senha"])
 
     resp = await client.patch(
@@ -167,9 +163,8 @@ async def test_api_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(clie
     )
     assert resp.status_code == 404
 
-    async with superadmin_scoped_connection(pool) as conn:
-        status = await conn.fetchval(
-            "SELECT status FROM incidentes WHERE empresa_id = $1 AND incident_id = $2",
+    async with db.superadmin_session() as conn:
+        status = await valor(conn, "SELECT status FROM incidentes WHERE empresa_id = $1 AND incident_id = $2",
             tenant_a["empresa_id"], incident_id_a,
         )
     assert status == "OPEN"
@@ -180,8 +175,8 @@ async def test_api_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(clie
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_web_detalhe_incidente_de_outra_empresa_e_404(client, tenant_a, tenant_b, pool):
-    incident_id_a = await _criar_incidente(pool, tenant_a["empresa_id"], "203.0.113.204")
+async def test_web_detalhe_incidente_de_outra_empresa_e_404(client, tenant_a, tenant_b, db):
+    incident_id_a = await _criar_incidente(db, tenant_a["empresa_id"], "203.0.113.204")
     await client.post("/login", data={"email": tenant_b["admin"]["email"], "senha": tenant_b["admin"]["senha"]})
 
     resp = await client.get(f"/incidentes/{incident_id_a}")
@@ -189,8 +184,8 @@ async def test_web_detalhe_incidente_de_outra_empresa_e_404(client, tenant_a, te
 
 
 @pytest.mark.asyncio
-async def test_web_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(client, tenant_a, tenant_b, pool):
-    incident_id_a = await _criar_incidente(pool, tenant_a["empresa_id"], "203.0.113.205")
+async def test_web_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(client, tenant_a, tenant_b, db):
+    incident_id_a = await _criar_incidente(db, tenant_a["empresa_id"], "203.0.113.205")
     await client.post("/login", data={"email": tenant_b["admin"]["email"], "senha": tenant_b["admin"]["senha"]})
 
     resp = await client.post(
@@ -200,9 +195,8 @@ async def test_web_triar_incidente_de_outra_empresa_e_404_e_nao_altera_nada(clie
     )
     assert resp.status_code == 404
 
-    async with superadmin_scoped_connection(pool) as conn:
-        status = await conn.fetchval(
-            "SELECT status FROM incidentes WHERE empresa_id = $1 AND incident_id = $2",
+    async with db.superadmin_session() as conn:
+        status = await valor(conn, "SELECT status FROM incidentes WHERE empresa_id = $1 AND incident_id = $2",
             tenant_a["empresa_id"], incident_id_a,
         )
     assert status == "OPEN"
@@ -223,7 +217,7 @@ async def test_api_listar_usuarios_nao_vaza_de_outra_empresa(client, tenant_a, t
 
 
 @pytest.mark.asyncio
-async def test_api_atualizar_usuario_de_outra_empresa_e_404_e_nao_altera_nada(client, tenant_a, tenant_b, pool):
+async def test_api_atualizar_usuario_de_outra_empresa_e_404_e_nao_altera_nada(client, tenant_a, tenant_b, db):
     alvo = tenant_a["analista"]
     await logar(client, tenant_b["admin"]["email"], tenant_b["admin"]["senha"])
 
@@ -234,12 +228,12 @@ async def test_api_atualizar_usuario_de_outra_empresa_e_404_e_nao_altera_nada(cl
     )
     assert resp.status_code == 404
 
-    estado = await _papel_e_ativo(pool, alvo["id"])
+    estado = await _papel_e_ativo(db, alvo["id"])
     assert estado == {"papel": "analista", "ativo": True}
 
 
 @pytest.mark.asyncio
-async def test_web_atualizar_usuario_de_outra_empresa_nao_altera_nada(client, tenant_a, tenant_b, pool):
+async def test_web_atualizar_usuario_de_outra_empresa_nao_altera_nada(client, tenant_a, tenant_b, db):
     alvo = tenant_a["analista"]
     await client.post("/login", data={"email": tenant_b["admin"]["email"], "senha": tenant_b["admin"]["senha"]})
 
@@ -255,7 +249,7 @@ async def test_web_atualizar_usuario_de_outra_empresa_nao_altera_nada(client, te
     assert resp.status_code == 200
     assert alvo["email"] not in resp.text
 
-    estado = await _papel_e_ativo(pool, alvo["id"])
+    estado = await _papel_e_ativo(db, alvo["id"])
     assert estado == {"papel": "analista", "ativo": True}
 
 
@@ -264,8 +258,8 @@ async def test_web_atualizar_usuario_de_outra_empresa_nao_altera_nada(client, te
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_api_listar_bloqueios_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, pool):
-    await _criar_bloqueio_direto(pool, tenant_a["empresa_id"], "203.0.113.211")
+async def test_api_listar_bloqueios_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, db):
+    await _criar_bloqueio_direto(db, tenant_a["empresa_id"], "203.0.113.211")
     await logar(client, tenant_b["admin"]["email"], tenant_b["admin"]["senha"])
 
     resp = await client.get("/api/v1/firewall/bloqueios")
@@ -274,11 +268,11 @@ async def test_api_listar_bloqueios_nao_vaza_de_outra_empresa(client, tenant_a, 
 
 
 @pytest.mark.asyncio
-async def test_api_remover_bloqueio_de_outra_empresa_nao_altera_registro_da_dona(client, tenant_a, tenant_b, pool, monkeypatch):
+async def test_api_remover_bloqueio_de_outra_empresa_nao_altera_registro_da_dona(client, tenant_a, tenant_b, db, monkeypatch):
     from sentinela.core import firewall as core_firewall
 
     ip = "203.0.113.212"
-    await _criar_bloqueio_direto(pool, tenant_a["empresa_id"], ip)
+    await _criar_bloqueio_direto(db, tenant_a["empresa_id"], ip)
     monkeypatch.setattr(core_firewall, "_tem_privilegios_root", lambda: True)
     monkeypatch.setattr(
         core_firewall.subprocess, "run",
@@ -297,12 +291,12 @@ async def test_api_remover_bloqueio_de_outra_empresa_nao_altera_registro_da_dona
     # cobertura direta de serviço deste comportamento (incluindo o caso em
     # que as DUAS empresas têm bloqueio próprio do mesmo IP).
     assert resp.json()["resultado"]["status"] == "erro"
-    assert await _status_bloqueio(pool, tenant_a["empresa_id"], ip) == "ativo"
+    assert await _status_bloqueio(db, tenant_a["empresa_id"], ip) == "ativo"
 
 
 @pytest.mark.asyncio
-async def test_web_listar_bloqueios_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, pool):
-    await _criar_bloqueio_direto(pool, tenant_a["empresa_id"], "203.0.113.213")
+async def test_web_listar_bloqueios_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, db):
+    await _criar_bloqueio_direto(db, tenant_a["empresa_id"], "203.0.113.213")
     await client.post("/login", data={"email": tenant_b["admin"]["email"], "senha": tenant_b["admin"]["senha"]})
 
     resp = await client.get("/firewall")
@@ -315,10 +309,10 @@ async def test_web_listar_bloqueios_nao_vaza_de_outra_empresa(client, tenant_a, 
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_api_listar_auditoria_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, pool):
+async def test_api_listar_auditoria_nao_vaza_de_outra_empresa(client, tenant_a, tenant_b, db):
     from sentinela.services import auditoria as servico_auditoria
 
-    async with superadmin_scoped_connection(pool) as conn:
+    async with db.superadmin_session() as conn:
         await servico_auditoria.registrar_evento(
             conn, tenant_a["empresa_id"], "teste.evento_sigiloso_tenant_a", {"segredo": "nao deveria vazar"},
         )
@@ -367,9 +361,9 @@ async def test_api_cache_de_reputacao_e_isolado_por_empresa(client, tenant_a, te
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_api_dashboard_nao_conta_incidentes_de_outra_empresa(client, tenant_a, tenant_b, pool):
+async def test_api_dashboard_nao_conta_incidentes_de_outra_empresa(client, tenant_a, tenant_b, db):
     for i in range(3):
-        await _criar_incidente(pool, tenant_a["empresa_id"], f"203.0.113.22{i}")
+        await _criar_incidente(db, tenant_a["empresa_id"], f"203.0.113.22{i}")
     await logar(client, tenant_b["admin"]["email"], tenant_b["admin"]["senha"])
 
     resp = await client.get("/api/v1/dashboard")
@@ -510,8 +504,8 @@ async def test_api_sub_inexistente_no_jwt_e_recusado(client, tenant_a):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_viewer_pode_listar_incidentes_mas_nao_pode_triar(client, tenant_a, pool):
-    incident_id = await _criar_incidente(pool, tenant_a["empresa_id"], "203.0.113.240")
+async def test_viewer_pode_listar_incidentes_mas_nao_pode_triar(client, tenant_a, db):
+    incident_id = await _criar_incidente(db, tenant_a["empresa_id"], "203.0.113.240")
     await logar(client, tenant_a["viewer"]["email"], tenant_a["viewer"]["senha"])
 
     resp_leitura = await client.get("/api/v1/incidentes")
@@ -553,7 +547,7 @@ async def test_viewer_nao_pode_criar_usuario(client, tenant_a):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_admin_nao_pode_alterar_o_proprio_papel(client, tenant_a, pool):
+async def test_admin_nao_pode_alterar_o_proprio_papel(client, tenant_a, db):
     admin = tenant_a["admin"]
     await logar(client, admin["email"], admin["senha"])
 
@@ -561,7 +555,7 @@ async def test_admin_nao_pode_alterar_o_proprio_papel(client, tenant_a, pool):
         f"/api/v1/usuarios/{admin['id']}", json={"papel": "analista"}, headers={"X-Sentinela-CSRF": "1"},
     )
     assert resp.status_code == 403
-    estado = await _papel_e_ativo(pool, admin["id"])
+    estado = await _papel_e_ativo(db, admin["id"])
     assert estado["papel"] == "admin"
 
 
@@ -617,30 +611,29 @@ async def test_analista_nao_pode_alterar_papel_de_outro_usuario(client, tenant_a
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
-async def saas_admin_de_teste(pool):
+async def saas_admin_de_teste(db):
     from sentinela.auth.security import hash_senha
 
     email = f"saas-admin-{uuid.uuid4()}@example.com"
     senha = "senha-forte-123"
     superadmin_id = uuid.uuid4()
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute(
-            "INSERT INTO superadmins (id, email, senha_hash, papel) VALUES ($1, $2, $3, 'saas_admin')",
+    async with db.superadmin_session() as conn:
+        await executar(conn, "INSERT INTO superadmins (id, email, senha_hash, papel) VALUES ($1, $2, $3, 'saas_admin')",
             superadmin_id, email, hash_senha(senha),
         )
     yield {"id": superadmin_id, "email": email, "senha": senha}
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("DELETE FROM auditoria WHERE ator_superadmin_id = $1", superadmin_id)
-        await conn.execute("DELETE FROM superadmins WHERE id = $1", superadmin_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "DELETE FROM auditoria WHERE ator_superadmin_id = $1", superadmin_id)
+        await executar(conn, "DELETE FROM superadmins WHERE id = $1", superadmin_id)
 
 
 @pytest.mark.asyncio
-async def test_saas_admin_nao_pode_revogar_licenca(client, saas_admin_de_teste, tenant_a, pool):
+async def test_saas_admin_nao_pode_revogar_licenca(client, saas_admin_de_teste, tenant_a, db):
     """C4 -- revogar licença é EXCLUSIVO de SAAS_OWNER (ver auth/rbac.py:exigir_saas_owner)."""
     from sentinela.services import licenciamento as servico_licenciamento
 
-    async with superadmin_scoped_connection(pool) as conn:
-        plano_id = await conn.fetchval("SELECT id FROM planos LIMIT 1")
+    async with db.superadmin_session() as conn:
+        plano_id = await valor(conn, "SELECT id FROM planos LIMIT 1")
         licenca, _token = await servico_licenciamento.criar_licenca(conn, tenant_a["empresa_id"], str(plano_id))
 
     await logar(client, saas_admin_de_teste["email"], saas_admin_de_teste["senha"])
@@ -651,7 +644,7 @@ async def test_saas_admin_nao_pode_revogar_licenca(client, saas_admin_de_teste, 
 
 
 @pytest.mark.asyncio
-async def test_saas_admin_com_claim_papel_saas_adulterada_para_owner_e_recusado(client, saas_admin_de_teste, tenant_a, pool):
+async def test_saas_admin_com_claim_papel_saas_adulterada_para_owner_e_recusado(client, saas_admin_de_teste, tenant_a, db):
     """Ataque: um SaaS Admin forja/edita a claim `papel_saas` no próprio
     cookie (ex.: JWT_SECRET vazado) para "saas_owner". O recheque em tempo
     real em `conexao_superadmin` (que compara contra `superadmins.papel`
@@ -659,8 +652,8 @@ async def test_saas_admin_com_claim_papel_saas_adulterada_para_owner_e_recusado(
     existia para `empresa_id`/`papel` adulterados."""
     from sentinela.services import licenciamento as servico_licenciamento
 
-    async with superadmin_scoped_connection(pool) as conn:
-        plano_id = await conn.fetchval("SELECT id FROM planos LIMIT 1")
+    async with db.superadmin_session() as conn:
+        plano_id = await valor(conn, "SELECT id FROM planos LIMIT 1")
         licenca, _token = await servico_licenciamento.criar_licenca(conn, tenant_a["empresa_id"], str(plano_id))
 
     token = _forjar_cookie_sessao({

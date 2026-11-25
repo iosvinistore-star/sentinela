@@ -9,9 +9,10 @@ FastAPI app factory. Monta:
     /             rotas HTML (Jinja2 + HTMX)
     /app          build estático do React SPA (produção)
 
-O pool asyncpg é criado uma vez no lifespan e guardado em `app.state.pool`
+O `Database` (engine SQLAlchemy assíncrono + sessões escopadas por tenant, ver
+`sentinela.database`) é criado uma vez no lifespan e guardado em `app.state.db`
 — toda dependência de banco (conexao_tenant/conexao_superadmin) lê daí via
-`request.app.state.pool`.
+`request.app.state.db`.
 """
 import asyncio
 import os
@@ -51,7 +52,7 @@ async def _lifespan(app: FastAPI):
     settings = carregar_settings()
     settings.validar()
     app.state.settings = settings
-    app.state.pool = Database.conectar(DatabaseSettings.de_settings(settings))
+    app.state.db = Database.conectar(DatabaseSettings.de_settings(settings))
     # Alerta no celular (services/push.py): registra a app para que a
     # criação de incidente possa disparar a notificação sem carregar o
     # objeto FastAPI por toda a camada de serviço.
@@ -60,7 +61,7 @@ async def _lifespan(app: FastAPI):
     # db/limitadores_compartilhados.py (substitui as versões em memória de
     # auth/rate_limit.py/core/limites_upload.py, que resolviam o item 4 das
     # "Limitações conhecidas" do README só para uma única réplica).
-    app.state.limitador_login = LimitadorTentativasCompartilhado(app.state.pool)
+    app.state.limitador_login = LimitadorTentativasCompartilhado(app.state.db)
     # Correção de bug encontrado em revisão crítica (2026-09): o heartbeat
     # de agente (auth/dependencies.py:agente_atual) passou a usar
     # `limitador_login` chaveado por (ip, prefixo do token) -- não só por
@@ -77,12 +78,12 @@ async def _lifespan(app: FastAPI):
     # nisso no cadência normal de heartbeat de 15-30s), mas para qualquer
     # flood de verdade (prefixos forjados incluídos).
     app.state.limitador_agente_ip = LimitadorTentativasCompartilhado(
-        app.state.pool, max_tentativas=40, janela_segundos=60, bloqueio_segundos=60,
+        app.state.db, max_tentativas=40, janela_segundos=60, bloqueio_segundos=60,
     )
     # Volume por usuário/empresa também compartilhado; concorrência de
     # análise de log continua em memória DE PROPÓSITO -- ver docstring de
     # LimitadorUploadsCompartilhado.
-    app.state.limitador_uploads = LimitadorUploadsCompartilhado(app.state.pool)
+    app.state.limitador_uploads = LimitadorUploadsCompartilhado(app.state.db)
     # Rate limiting de licenciamento (ver auth/dependencies.py:
     # licenca_atual) -- instâncias PRÓPRIAS, nunca reaproveitam
     # limitador_login/limitador_agente_ip: um token de licença ruim em loop
@@ -90,9 +91,9 @@ async def _lifespan(app: FastAPI):
     # heartbeat de agentes EDR, e vice-versa. Mesmos parâmetros do backstop
     # por IP de agentes (40 falhas/60s) -- mesmo raciocínio, adaptado para
     # licenciamento em vez de heartbeat de endpoint.
-    app.state.limitador_licenca = LimitadorTentativasCompartilhado(app.state.pool)
+    app.state.limitador_licenca = LimitadorTentativasCompartilhado(app.state.db)
     app.state.limitador_licenca_ip = LimitadorTentativasCompartilhado(
-        app.state.pool, max_tentativas=40, janela_segundos=60, bloqueio_segundos=60,
+        app.state.db, max_tentativas=40, janela_segundos=60, bloqueio_segundos=60,
     )
     # Fase D / D3 -- troca de token de enrollment por identidade de agente
     # (ver auth/dependencies.py:enrollment_atual e
@@ -101,9 +102,9 @@ async def _lifespan(app: FastAPI):
     # limitador_licenca/limitador_agente_ip: um token de enrollment ruim em
     # loop não deve consumir o orçamento de tentativas de nenhuma outra
     # família de token.
-    app.state.limitador_enrollment = LimitadorTentativasCompartilhado(app.state.pool)
+    app.state.limitador_enrollment = LimitadorTentativasCompartilhado(app.state.db)
     app.state.limitador_enrollment_ip = LimitadorTentativasCompartilhado(
-        app.state.pool, max_tentativas=40, janela_segundos=60, bloqueio_segundos=60,
+        app.state.db, max_tentativas=40, janela_segundos=60, bloqueio_segundos=60,
     )
     # Fase C (MFA/TOTP, C9) -- instância PRÓPRIA, nunca reaproveita
     # `limitador_login`: um código TOTP/recovery errado em loop não deve
@@ -113,7 +114,7 @@ async def _lifespan(app: FastAPI):
     # IP -- um código TOTP de 6 dígitos tem espaço de busca pequeno o
     # bastante (10^6) para que um limite por usuário (não diluído entre
     # vários alvos atrás do mesmo IP) seja a defesa que importa aqui.
-    app.state.limitador_mfa = LimitadorTentativasCompartilhado(app.state.pool)
+    app.state.limitador_mfa = LimitadorTentativasCompartilhado(app.state.db)
     # Modo autônomo (ver services/automacao.py) -- SEM esta tarefa em
     # background, o autoajuste de modo_firewall e a auto-triagem de
     # incidentes (capacidades 1 e 2, ambas opt-in por tenant) só
@@ -123,17 +124,17 @@ async def _lifespan(app: FastAPI):
     # vida do processo; cancelada de propósito no shutdown (não
     # `await`ada até terminar -- ela nunca termina sozinha, é um loop
     # infinito por design).
-    app.state.tarefa_syslog = await iniciar_syslog_udp(app.state.pool)
+    app.state.tarefa_syslog = await iniciar_syslog_udp(app.state.db)
     app.state.tarefa_retencao_siem = asyncio.create_task(
         rodar_retencao_siem_periodicamente(
-            app.state.pool,
+            app.state.db,
             settings.siem_retencao_intervalo_horas,
             settings.siem_hot_days,
             settings.siem_cold_days,
         )
     )
     app.state.tarefa_ciclo_autonomo = asyncio.create_task(
-        rodar_ciclo_autonomo_periodicamente(app.state.pool, settings.ciclo_autonomo_intervalo_segundos)
+        rodar_ciclo_autonomo_periodicamente(app.state.db, settings.ciclo_autonomo_intervalo_segundos)
     )
     try:
         yield
@@ -152,7 +153,7 @@ async def _lifespan(app: FastAPI):
             await app.state.tarefa_ciclo_autonomo
         except asyncio.CancelledError:
             pass
-        await app.state.pool.fechar()
+        await app.state.db.fechar()
 
 
 def criar_app() -> FastAPI:

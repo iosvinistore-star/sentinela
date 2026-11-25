@@ -8,6 +8,7 @@ import pytest
 
 from sentinela.services import chave_ativacao
 from tests.api.conftest_api import logar
+from tests.sql_cru import buscar, executar
 
 CSRF = {"X-Sentinela-CSRF": "1"}
 HEADER_ENROLLMENT = "X-Sentinela-Enrollment-Token"
@@ -24,11 +25,10 @@ def test_formato_ida_e_volta_e_aviso_localhost():
 
 
 @pytest.mark.asyncio
-async def test_provedor_gera_chave_e_agente_se_registra(client, superadmin_de_teste, usuario_de_teste, pool):
-    from sentinela.db.pool import superadmin_scoped_connection
+async def test_provedor_gera_chave_e_agente_se_registra(client, superadmin_de_teste, usuario_de_teste, db):
     empresa_id = usuario_de_teste["empresa_id"]
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE empresas SET agentes_endpoint_habilitado = false WHERE id = $1", empresa_id)
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE empresas SET agentes_endpoint_habilitado = false WHERE id = $1", empresa_id)
 
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
     r = await client.post(f"/api/v1/admin/empresas/{empresa_id}/chave-ativacao", headers=CSRF,
@@ -45,9 +45,9 @@ async def test_provedor_gera_chave_e_agente_se_registra(client, superadmin_de_te
     assert r.status_code == 200, r.text
     assert r.json()["token"].startswith("agt_")
 
-    async with superadmin_scoped_connection(pool) as conn:
-        hosts = await conn.fetch("SELECT hostname FROM agentes WHERE empresa_id = $1", empresa_id)
-        acoes = await conn.fetch("SELECT acao, ator_superadmin_id FROM auditoria WHERE empresa_id = $1 AND acao IN "
+    async with db.superadmin_session() as conn:
+        hosts = await buscar(conn, "SELECT hostname FROM agentes WHERE empresa_id = $1", empresa_id)
+        acoes = await buscar(conn, "SELECT acao, ator_superadmin_id FROM auditoria WHERE empresa_id = $1 AND acao IN "
                                  "('empresa.agentes_habilitados', 'agente.enrollment_criado')", empresa_id)
     assert [h["hostname"] for h in hosts] == ["cliente-pc-01"]
     assert {a["acao"] for a in acoes} == {"empresa.agentes_habilitados", "agente.enrollment_criado"}
@@ -55,13 +55,12 @@ async def test_provedor_gera_chave_e_agente_se_registra(client, superadmin_de_te
 
 
 @pytest.mark.asyncio
-async def test_chave_404_409_e_admin_da_empresa_nao_acessa(client, superadmin_de_teste, usuario_de_teste, pool):
-    from sentinela.db.pool import superadmin_scoped_connection
+async def test_chave_404_409_e_admin_da_empresa_nao_acessa(client, superadmin_de_teste, usuario_de_teste, db):
     await logar(client, superadmin_de_teste["email"], superadmin_de_teste["senha"])
     r = await client.post("/api/v1/admin/empresas/00000000-0000-0000-0000-000000000000/chave-ativacao", headers=CSRF, json={})
     assert r.status_code == 404
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE empresas SET status = 'suspensa' WHERE id = $1", usuario_de_teste["empresa_id"])
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE empresas SET status = 'suspensa' WHERE id = $1", usuario_de_teste["empresa_id"])
     r = await client.post(f"/api/v1/admin/empresas/{usuario_de_teste['empresa_id']}/chave-ativacao", headers=CSRF, json={})
     assert r.status_code == 409
     await client.post("/api/v1/auth/logout", headers=CSRF)

@@ -8,14 +8,14 @@ import uuid
 
 import pytest
 
-from sentinela.db.pool import superadmin_scoped_connection
 from tests.api.conftest_api import logar
+from tests.sql_cru import executar
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_desativar_usuario_derruba_sessao_ja_aberta_na_proxima_requisicao(client, analista_de_teste, pool):
+async def test_desativar_usuario_derruba_sessao_ja_aberta_na_proxima_requisicao(client, analista_de_teste, db):
     """Revogação em tempo real (conexao_tenant, ver auth/dependencies.py):
     um usuário desativado DEPOIS de logar não deveria continuar com acesso
     só porque o JWT ainda não expirou -- a próxima requisição precisa
@@ -24,15 +24,15 @@ async def test_desativar_usuario_derruba_sessao_ja_aberta_na_proxima_requisicao(
     resp_antes = await client.get("/api/v1/incidentes")
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE usuarios SET ativo = false WHERE id = $1", analista_de_teste["id"])
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE usuarios SET ativo = false WHERE id = $1", analista_de_teste["id"])
 
     resp_depois = await client.get("/api/v1/incidentes")
     assert resp_depois.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_rebaixar_papel_derruba_sessao_ja_aberta_na_proxima_requisicao(client, usuario_de_teste, pool):
+async def test_rebaixar_papel_derruba_sessao_ja_aberta_na_proxima_requisicao(client, usuario_de_teste, db):
     """Mesmo cenário, mas para troca de PAPEL em vez de desativação: um
     admin rebaixado a analista não pode continuar agindo como admin só
     porque o token antigo ainda diz "admin"."""
@@ -40,8 +40,8 @@ async def test_rebaixar_papel_derruba_sessao_ja_aberta_na_proxima_requisicao(cli
     resp_antes = await client.get("/api/v1/usuarios")
     assert resp_antes.status_code == 200
 
-    async with superadmin_scoped_connection(pool) as conn:
-        await conn.execute("UPDATE usuarios SET papel = 'analista' WHERE id = $1", usuario_de_teste["id"])
+    async with db.superadmin_session() as conn:
+        await executar(conn, "UPDATE usuarios SET papel = 'analista' WHERE id = $1", usuario_de_teste["id"])
 
     resp_depois = await client.get("/api/v1/usuarios")
     assert resp_depois.status_code == 401

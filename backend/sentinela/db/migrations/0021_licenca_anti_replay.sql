@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS licencas_nonces_usados (
     UNIQUE (licenca_id, nonce)
 );
 
--- Sem RLS: o lookup roda em `superadmin_scoped_connection` (BYPASSRLS) --
+-- Sem RLS: o lookup roda em `Database.superadmin_session` (BYPASSRLS) --
 -- mesmo "ovo e galinha" de `autenticar_licenca`/`agentes` (o token ainda
 -- não foi resolvido para um tenant quando a checagem de nonce por si só
 -- precisaria rodar; na prática a checagem de nonce só acontece DEPOIS de
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS licencas_nonces_usados (
 CREATE INDEX IF NOT EXISTS idx_licencas_nonces_usados_criado_em ON licencas_nonces_usados (criado_em);
 
 -- Least-privilege igual ao resto do projeto: só app_superadmin toca esta
--- tabela (é BYPASSRLS/superadmin_scoped_connection quem opera aqui, nunca
+-- tabela (é BYPASSRLS/Database.superadmin_session quem opera aqui, nunca
 -- uma conexão tenant-scoped) -- inclusive DELETE, usado pela limpeza
 -- oportunista de entradas já fora da janela de replay (ver docstring de
 -- auth/dependencies.py:_registrar_nonce_ou_recusar).

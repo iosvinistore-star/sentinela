@@ -7,7 +7,7 @@
 
 import datetime
 import uuid
-from typing import Optional
+from typing import ClassVar, Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -31,6 +31,7 @@ from sentinela.database.base import Base
 
 class Agente(Base):
     __tablename__ = "agentes"
+    _sensiveis: ClassVar[frozenset[str]] = frozenset({"token_hash"})
     __table_args__ = (
         CheckConstraint("status = ANY (ARRAY['ativo'::text, 'revogado'::text])", name="agentes_status_check"),
         ForeignKeyConstraint(["criado_por_usuario_id"], ["usuarios.id"], name="agentes_criado_por_usuario_id_fkey"),
@@ -57,6 +58,7 @@ class Agente(Base):
 
 class AgenteEnrollmentToken(Base):
     __tablename__ = "agentes_enrollment_tokens"
+    _sensiveis: ClassVar[frozenset[str]] = frozenset({"token_hash"})
     __table_args__ = (
         CheckConstraint("max_usos IS NULL OR max_usos > 0", name="agentes_enrollment_tokens_max_usos_check"),
         CheckConstraint("status = ANY (ARRAY['ativo'::text, 'revogado'::text])", name="agentes_enrollment_tokens_status_check"),

@@ -34,16 +34,16 @@ async def listar_incidentes(
     # por qualquer usuário autenticado (analista incluído), sem custo algum
     # para quem chama.
     limite: int = Query(100, gt=0, le=500),
-    usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant),
+    usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant),
 ):
     if status and status not in _STATUS_VALIDOS:
         raise HTTPException(status_code=422, detail=f"status inválido -- use um de {sorted(_STATUS_VALIDOS)}")
-    return {"incidentes": await servico.listar_incidentes(conn, status=status, limite=limite)}
+    return {"incidentes": await servico.listar_incidentes(sessao, status=status, limite=limite)}
 
 
 @router.get("/{incident_id}")
-async def obter_incidente(incident_id: str, usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
-    incidente = await servico.obter_incidente(conn, usuario["empresa_id"], incident_id)
+async def obter_incidente(incident_id: str, usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
+    incidente = await servico.obter_incidente(sessao, usuario["empresa_id"], incident_id)
     if incidente is None:
         raise HTTPException(status_code=404, detail="incidente não encontrado")
     return {"incidente": incidente}
@@ -54,11 +54,11 @@ async def atualizar_status(incident_id: str, dados: AtualizarStatusRequest,
                              # Fase C / C1 -- VIEWER é somente leitura: não pode triar
                              # incidentes. Retrofit de `exigir_login` (que também
                              # aceitava viewer) para `exigir_papel("admin", "analista")`.
-                             usuario: dict = Depends(exigir_papel("admin", "analista")), conn=Depends(conexao_tenant)):
+                             usuario: dict = Depends(exigir_papel("admin", "analista")), sessao=Depends(conexao_tenant)):
     if dados.status not in _STATUS_VALIDOS:
         raise HTTPException(status_code=422, detail=f"status inválido -- use um de {sorted(_STATUS_VALIDOS)}")
     incidente = await servico.atualizar_status(
-        conn, usuario["empresa_id"], incident_id, dados.status, dados.observacoes, usuario_id=usuario["sub"],
+        sessao, usuario["empresa_id"], incident_id, dados.status, dados.observacoes, usuario_id=usuario["sub"],
     )
     if incidente is None:
         raise HTTPException(status_code=404, detail="incidente não encontrado")

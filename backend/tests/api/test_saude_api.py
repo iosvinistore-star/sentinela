@@ -35,14 +35,14 @@ async def test_ready_com_banco_indisponivel_retorna_503(client, app_instance):
         async def fetchval(self, *args, **kwargs):
             raise ConnectionRefusedError("simulado: Postgres fora do ar")
 
-    pool_original = app_instance.state.pool
-    app_instance.state.pool = _PoolQuebrado()
+    pool_original = app_instance.state.db
+    app_instance.state.db = _PoolQuebrado()
     try:
         resp = await client.get("/ready")
         assert resp.status_code == 503
         assert resp.json()["status"] == "not_ready"
     finally:
-        app_instance.state.pool = pool_original
+        app_instance.state.db = pool_original
 
 
 @pytest.mark.asyncio
@@ -55,10 +55,10 @@ async def test_ready_nao_e_afetado_por_falha_de_health(client, app_instance):
         async def fetchval(self, *args, **kwargs):
             raise ConnectionRefusedError("simulado: Postgres fora do ar")
 
-    pool_original = app_instance.state.pool
-    app_instance.state.pool = _PoolQuebrado()
+    pool_original = app_instance.state.db
+    app_instance.state.db = _PoolQuebrado()
     try:
         resp = await client.get("/health")
         assert resp.status_code == 200
     finally:
-        app_instance.state.pool = pool_original
+        app_instance.state.db = pool_original

@@ -17,8 +17,8 @@ _STATUS_VALIDOS = ["OPEN", "EM_ANDAMENTO", "RESOLVIDO", "FALSO_POSITIVO"]
 
 @router.get("/incidentes")
 async def listar(request: Request, status: str | None = None,
-                   usuario: dict = Depends(exigir_login_web), conn=Depends(conexao_tenant_web)):
-    incidentes = await servico.listar_incidentes(conn, status=status or None)
+                   usuario: dict = Depends(exigir_login_web), sessao=Depends(conexao_tenant_web)):
+    incidentes = await servico.listar_incidentes(sessao, status=status or None)
     return templates.TemplateResponse(request, "incidentes/lista.html", {
         "usuario": usuario, "incidentes": incidentes,
         "status_filtro": status, "status_validos": _STATUS_VALIDOS,
@@ -27,8 +27,8 @@ async def listar(request: Request, status: str | None = None,
 
 @router.get("/incidentes/{incident_id}")
 async def detalhe(incident_id: str, request: Request,
-                    usuario: dict = Depends(exigir_login_web), conn=Depends(conexao_tenant_web)):
-    incidente = await servico.obter_incidente(conn, usuario["empresa_id"], incident_id)
+                    usuario: dict = Depends(exigir_login_web), sessao=Depends(conexao_tenant_web)):
+    incidente = await servico.obter_incidente(sessao, usuario["empresa_id"], incident_id)
     if incidente is None:
         raise HTTPException(status_code=404, detail="incidente não encontrado")
     return templates.TemplateResponse(request, "incidentes/detalhe.html", {
@@ -43,11 +43,11 @@ async def atualizar_status(incident_id: str, request: Request, status: str = For
                              observacoes: str = Form("", max_length=4000),
                              # Fase C / C1 -- VIEWER é somente leitura, ver
                              # api/v1/incidentes.py:atualizar_status.
-                             usuario: dict = Depends(exigir_papel_web("admin", "analista")), conn=Depends(conexao_tenant_web)):
+                             usuario: dict = Depends(exigir_papel_web("admin", "analista")), sessao=Depends(conexao_tenant_web)):
     if status not in _STATUS_VALIDOS:
         raise HTTPException(status_code=422, detail="status inválido")
     incidente = await servico.atualizar_status(
-        conn, usuario["empresa_id"], incident_id, status, observacoes, usuario_id=usuario["sub"],
+        sessao, usuario["empresa_id"], incident_id, status, observacoes, usuario_id=usuario["sub"],
     )
     if incidente is None:
         raise HTTPException(status_code=404, detail="incidente não encontrado")

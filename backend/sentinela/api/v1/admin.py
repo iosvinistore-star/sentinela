@@ -94,16 +94,16 @@ class CriarSaasAdminRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.get("/saas-admins")
-async def listar_saas_admins(su: dict = Depends(exigir_saas_owner), conn=Depends(conexao_superadmin)):
-    return {"contas": await servico_superadmins.listar_saas_admins(conn)}
+async def listar_saas_admins(su: dict = Depends(exigir_saas_owner), sessao=Depends(conexao_superadmin)):
+    return {"contas": await servico_superadmins.listar_saas_admins(sessao)}
 
 
 @router.post("/saas-admins", dependencies=[Depends(exigir_csrf_header)])
 async def criar_saas_admin(dados: CriarSaasAdminRequest, su: dict = Depends(exigir_saas_owner),
-                             conn=Depends(conexao_superadmin)):
+                             sessao=Depends(conexao_superadmin)):
     try:
         criado = await servico_superadmins.criar_saas_admin(
-            conn, dados.email, dados.senha, dados.papel_saas, ator_superadmin_id=su["sub"],
+            sessao, dados.email, dados.senha, dados.papel_saas, ator_superadmin_id=su["sub"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -113,20 +113,20 @@ async def criar_saas_admin(dados: CriarSaasAdminRequest, su: dict = Depends(exig
 
 
 @router.get("/mfa")
-async def status_mfa_saas(su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
-    return await servico_mfa.obter_status_mfa_superadmin(conn, su["sub"])
+async def status_mfa_saas(su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
+    return await servico_mfa.obter_status_mfa_superadmin(sessao, su["sub"])
 
 @router.post("/mfa/setup", dependencies=[Depends(exigir_csrf_header)])
-async def setup_mfa_saas(su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin), request: Request = None):
+async def setup_mfa_saas(su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin), request: Request = None):
     try:
-        return await servico_mfa.iniciar_configuracao_superadmin(conn, request.app.state.settings.mfa_encryption_key, su["sub"], su["email"])
+        return await servico_mfa.iniciar_configuracao_superadmin(sessao, request.app.state.settings.mfa_encryption_key, su["sub"], su["email"])
     except servico_mfa.MfaJaHabilitadoError as exc:
         raise HTTPException(status_code=409, detail="MFA já habilitado") from exc
 
 @router.post("/mfa/confirm", dependencies=[Depends(exigir_csrf_header)])
-async def confirmar_mfa_saas(dados: MfaCodigoRequest, su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin), request: Request = None):
+async def confirmar_mfa_saas(dados: MfaCodigoRequest, su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin), request: Request = None):
     try:
-        codes=await servico_mfa.confirmar_configuracao_superadmin(conn, request.app.state.settings.mfa_encryption_key, su["sub"], dados.codigo)
+        codes=await servico_mfa.confirmar_configuracao_superadmin(sessao, request.app.state.settings.mfa_encryption_key, su["sub"], dados.codigo)
     except servico_mfa.MfaNaoConfiguradoError as exc:
         raise HTTPException(status_code=409, detail="setup de MFA não iniciado") from exc
     except servico_mfa.CodigoInvalidoError as exc:
@@ -134,28 +134,28 @@ async def confirmar_mfa_saas(dados: MfaCodigoRequest, su: dict = Depends(exigir_
     return {"recovery_codes": codes}
 
 @router.post("/mfa/disable", dependencies=[Depends(exigir_csrf_header)])
-async def desativar_mfa_saas(dados: MfaCodigoRequest, su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin), request: Request = None):
+async def desativar_mfa_saas(dados: MfaCodigoRequest, su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin), request: Request = None):
     if not dados.codigo and not dados.recovery_code:
         raise HTTPException(status_code=422, detail="informe código TOTP ou recovery code para desativar MFA")
     ok = await servico_mfa.verificar_no_login_superadmin(
-        conn, request.app.state.settings.mfa_encryption_key, su["sub"],
+        sessao, request.app.state.settings.mfa_encryption_key, su["sub"],
         codigo=dados.codigo, recovery_code=dados.recovery_code,
     )
     if not ok:
         raise HTTPException(status_code=401, detail="fator MFA inválido")
-    await servico_mfa.desativar_superadmin(conn, su["sub"], su["sub"])
+    await servico_mfa.desativar_superadmin(sessao, su["sub"], su["sub"])
     return {"ok": True}
 
 
 @router.get("/empresas")
-async def listar_empresas(su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
-    return {"empresas": await servico_empresas.listar_empresas(conn)}
+async def listar_empresas(su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
+    return {"empresas": await servico_empresas.listar_empresas(sessao)}
 
 
 @router.post("/empresas", dependencies=[Depends(exigir_csrf_header)])
 async def criar_empresa(dados: CriarEmpresaRequest, su: dict = Depends(exigir_superadmin),
-                          conn=Depends(conexao_superadmin)):
-    empresa = await servico_empresas.criar_empresa(conn, dados.nome, dados.plano, ator_superadmin_id=su["sub"])
+                          sessao=Depends(conexao_superadmin)):
+    empresa = await servico_empresas.criar_empresa(sessao, dados.nome, dados.plano, ator_superadmin_id=su["sub"])
     return {"empresa": empresa}
 
 
@@ -167,11 +167,11 @@ async def atualizar_empresa(
     # de 422).
     empresa_id: uuid.UUID,
     dados: AtualizarEmpresaRequest,
-    su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin),
+    su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin),
 ):
     try:
         empresa = await servico_empresas.atualizar_empresa(
-            conn, str(empresa_id), nome=dados.nome, plano=dados.plano, status=dados.status,
+            sessao, str(empresa_id), nome=dados.nome, plano=dados.plano, status=dados.status,
             modo_firewall=dados.modo_firewall, modo_firewall_auto=dados.modo_firewall_auto,
             auto_triagem_incidentes=dados.auto_triagem_incidentes,
             agentes_endpoint_habilitado=dados.agentes_endpoint_habilitado, ator_superadmin_id=su["sub"],
@@ -185,24 +185,24 @@ async def atualizar_empresa(
 
 @router.get("/empresas/{empresa_id}/usuarios")
 async def listar_usuarios_da_empresa(empresa_id: uuid.UUID, su: dict = Depends(exigir_superadmin),
-                                       conn=Depends(conexao_superadmin)):
-    return {"usuarios": await servico_usuarios.listar_usuarios_por_empresa(conn, str(empresa_id))}
+                                       sessao=Depends(conexao_superadmin)):
+    return {"usuarios": await servico_usuarios.listar_usuarios_por_empresa(sessao, str(empresa_id))}
 
 
 @router.post("/empresas/{empresa_id}/usuarios", dependencies=[Depends(exigir_csrf_header)])
 async def criar_usuario_da_empresa(empresa_id: uuid.UUID, dados: CriarUsuarioEmpresaRequest,
-                                     su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
+                                     su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
     if dados.papel not in _PAPEIS_VALIDOS:
         raise HTTPException(status_code=422, detail=f"papel inválido -- use um de {sorted(_PAPEIS_VALIDOS)}")
     # Confere a empresa ANTES do INSERT: sem isso, um empresa_id de formato
     # válido mas inexistente batia direto na FK de `usuarios.empresa_id` e
     # virava um asyncpg.ForeignKeyViolationError cru -- também não é
     # subclasse de ValueError, também vira 500 em vez de um 404 claro.
-    if await servico_empresas.obter_empresa(conn, str(empresa_id)) is None:
+    if await servico_empresas.obter_empresa(sessao, str(empresa_id)) is None:
         raise HTTPException(status_code=404, detail="empresa não encontrada")
     try:
         criado = await servico_usuarios.criar_usuario(
-            conn, str(empresa_id), dados.email, dados.papel, dados.senha, ator_superadmin_id=su["sub"],
+            sessao, str(empresa_id), dados.email, dados.papel, dados.senha, ator_superadmin_id=su["sub"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -213,7 +213,7 @@ async def criar_usuario_da_empresa(empresa_id: uuid.UUID, dados: CriarUsuarioEmp
 
 @router.patch("/me/senha", dependencies=[Depends(exigir_csrf_header)])
 async def trocar_propria_senha_superadmin(dados: TrocarSenhaSuperadminRequest, request: Request, response: Response,
-                                            su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
+                                            su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
     """
     Espelha api/v1/usuarios.py:trocar_propria_senha (mesmo rate limiting
     por chamador, mesma reemissão de cookie) -- ver
@@ -233,7 +233,7 @@ async def trocar_propria_senha_superadmin(dados: TrocarSenhaSuperadminRequest, r
             status_code=429, detail=f"muitas tentativas -- tente de novo em {int(restante) + 1} segundos",
             headers={"Retry-After": str(int(restante) + 1)},
         )
-    novo_tv = await servico_superadmins.trocar_propria_senha(conn, su["sub"], dados.senha_atual, dados.senha_nova)
+    novo_tv = await servico_superadmins.trocar_propria_senha(sessao, su["sub"], dados.senha_atual, dados.senha_nova)
     if novo_tv is None:
         raise HTTPException(status_code=401, detail="senha atual incorreta")
     await limitador.registrar_sucesso(chave)
@@ -347,7 +347,7 @@ def _texto_para_cliente(nome: str, url: str, email: str, senha: str, chave: str)
 
 @router.post("/clientes", dependencies=[Depends(exigir_csrf_header)], status_code=201)
 async def cadastrar_cliente(dados: NovoClienteRequest, request: Request,
-                            su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
+                            su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
     """Cadastra um cliente inteiro: empresa + contrato + admin + chave de ativação.
 
     Devolve a senha inicial e a chave de ativação EM TEXTO CLARO uma única
@@ -363,9 +363,9 @@ async def cadastrar_cliente(dados: NovoClienteRequest, request: Request,
     if dados.contrato.email_contato and not _RE_EMAIL.match(dados.contrato.email_contato.strip()):
         raise HTTPException(status_code=422, detail="e-mail de contato inválido")
     if cnpj is not None:
-        ja_existe = await conn.fetchrow("SELECT nome FROM empresas WHERE cnpj = $1", cnpj)
-        if ja_existe is not None:
-            raise HTTPException(status_code=409, detail=f"já existe um cliente com este CNPJ: {ja_existe['nome']}")
+        nome_existente = await servico_empresas.nome_da_empresa_com_cnpj(sessao, cnpj)
+        if nome_existente is not None:
+            raise HTTPException(status_code=409, detail=f"já existe um cliente com este CNPJ: {nome_existente}")
 
     senha = dados.admin_senha or _gerar_senha_inicial()
     expira_em = datetime.now(timezone.utc) + timedelta(hours=dados.validade_horas)
@@ -373,37 +373,33 @@ async def cadastrar_cliente(dados: NovoClienteRequest, request: Request,
     # UMA transação para os cinco passos. Um cliente "meio criado" (empresa
     # sem admin, ou admin sem chave) é pior do que nenhum: alguém teria de
     # descobrir em que ponto parou antes de tentar de novo.
-    async with conn.transaction():
+    async with sessao.begin_nested():
         empresa = await servico_empresas.criar_empresa(
-            conn, dados.nome.strip(), dados.plano, ator_superadmin_id=su["sub"],
+            sessao, dados.nome.strip(), dados.plano, ator_superadmin_id=su["sub"],
         )
         empresa_id = empresa["id"]
-        atualizada = await conn.fetchrow(
-            """
-            UPDATE empresas
-               SET cnpj = $2, responsavel = $3, email_contato = $4, telefone = $5,
-                   contrato_numero = $6, contrato_vigencia = $7, observacoes = $8,
-                   agentes_endpoint_habilitado = true
-             WHERE id = $1
-            RETURNING *
-            """,
-            uuid.UUID(empresa_id), cnpj, dados.contrato.responsavel, dados.contrato.email_contato,
-            dados.contrato.telefone, dados.contrato.contrato_numero, dados.contrato.contrato_vigencia,
-            dados.contrato.observacoes,
+        atualizada = await servico_empresas.gravar_dados_contrato(
+            sessao, uuid.UUID(empresa_id), cnpj,
+            {
+                "responsavel": dados.contrato.responsavel, "email_contato": dados.contrato.email_contato,
+                "telefone": dados.contrato.telefone, "contrato_numero": dados.contrato.contrato_numero,
+                "contrato_vigencia": dados.contrato.contrato_vigencia, "observacoes": dados.contrato.observacoes,
+            },
+            habilitar_agentes=True,
         )
         try:
             admin = await servico_usuarios.criar_usuario(
-                conn, empresa_id, dados.admin_email.strip(), "admin", senha, ator_superadmin_id=su["sub"],
+                sessao, empresa_id, dados.admin_email.strip(), "admin", senha, ator_superadmin_id=su["sub"],
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if admin is None:
             raise HTTPException(status_code=409, detail="já existe um usuário com este e-mail")
         _, token = await servico_enrollment.criar_token_enrollment(
-            conn, empresa_id, expira_em, max_usos=dados.max_instalacoes, ator_superadmin_id=su["sub"],
+            sessao, empresa_id, expira_em, max_usos=dados.max_instalacoes, ator_superadmin_id=su["sub"],
         )
         await servico_auditoria.registrar_evento(
-            conn, empresa_id, "cliente.cadastrado",
+            sessao, empresa_id, "cliente.cadastrado",
             {"nome": dados.nome, "plano": dados.plano, "admin_email": dados.admin_email,
              "contrato_numero": dados.contrato.contrato_numero},
             ator_superadmin_id=su["sub"],
@@ -411,10 +407,8 @@ async def cadastrar_cliente(dados: NovoClienteRequest, request: Request,
 
     backend_url = chave_ativacao.endereco_publico(request.app.state.settings.url_base_publica, str(request.base_url))
     chave = chave_ativacao.gerar(backend_url, token)
-    empresa_publica = dict(atualizada)
-    empresa_publica["id"] = str(empresa_publica["id"])
     return {
-        "empresa": empresa_publica,
+        "empresa": atualizada,
         "admin": {"email": dados.admin_email.strip(), "senha_inicial": senha,
                   "senha_gerada": dados.admin_senha is None},
         "chave_ativacao": chave,
@@ -430,7 +424,7 @@ async def cadastrar_cliente(dados: NovoClienteRequest, request: Request,
 
 @router.patch("/empresas/{empresa_id}/contrato", dependencies=[Depends(exigir_csrf_header)])
 async def atualizar_contrato(empresa_id: uuid.UUID, dados: DadosContrato,
-                             su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
+                             su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
     """Edita só os dados comerciais -- separado de `PATCH /empresas/{id}`,
     que mexe em capacidades operacionais (firewall, automação, agentes)."""
     cnpj = _normalizar_cnpj(dados.cnpj)
@@ -439,35 +433,30 @@ async def atualizar_contrato(empresa_id: uuid.UUID, dados: DadosContrato,
     if dados.email_contato and not _RE_EMAIL.match(dados.email_contato.strip()):
         raise HTTPException(status_code=422, detail="e-mail de contato inválido")
     if cnpj is not None:
-        conflito = await conn.fetchrow("SELECT nome FROM empresas WHERE cnpj = $1 AND id <> $2", cnpj, empresa_id)
+        conflito = await servico_empresas.nome_da_empresa_com_cnpj(sessao, cnpj, exceto_id=empresa_id)
         if conflito is not None:
-            raise HTTPException(status_code=409, detail=f"este CNPJ já pertence a: {conflito['nome']}")
-    row = await conn.fetchrow(
-        """
-        UPDATE empresas
-           SET cnpj = $2, responsavel = $3, email_contato = $4, telefone = $5,
-               contrato_numero = $6, contrato_vigencia = $7, observacoes = $8
-         WHERE id = $1
-        RETURNING *
-        """,
-        empresa_id, cnpj, dados.responsavel, dados.email_contato, dados.telefone,
-        dados.contrato_numero, dados.contrato_vigencia, dados.observacoes,
+            raise HTTPException(status_code=409, detail=f"este CNPJ já pertence a: {conflito}")
+    atualizada = await servico_empresas.gravar_dados_contrato(
+        sessao, empresa_id, cnpj,
+        {
+            "responsavel": dados.responsavel, "email_contato": dados.email_contato, "telefone": dados.telefone,
+            "contrato_numero": dados.contrato_numero, "contrato_vigencia": dados.contrato_vigencia,
+            "observacoes": dados.observacoes,
+        },
     )
-    if row is None:
+    if atualizada is None:
         raise HTTPException(status_code=404, detail="empresa não encontrada")
     await servico_auditoria.registrar_evento(
-        conn, str(empresa_id), "empresa.contrato_atualizado",
+        sessao, str(empresa_id), "empresa.contrato_atualizado",
         {"contrato_numero": dados.contrato_numero, "responsavel": dados.responsavel},
         ator_superadmin_id=su["sub"],
     )
-    publica = dict(row)
-    publica["id"] = str(publica["id"])
-    return {"empresa": publica}
+    return {"empresa": atualizada}
 
 
 @router.post("/empresas/{empresa_id}/chave-ativacao", dependencies=[Depends(exigir_csrf_header)])
 async def gerar_chave_ativacao(empresa_id: uuid.UUID, dados: ChaveAtivacaoRequest, request: Request,
-                               su: dict = Depends(exigir_superadmin), conn=Depends(conexao_superadmin)):
+                               su: dict = Depends(exigir_superadmin), sessao=Depends(conexao_superadmin)):
     """Provedor gera a chave de ativação dos agentes de uma empresa cliente.
 
     A chave junta o endereço do SaaS e um token de instalação da empresa; o
@@ -475,25 +464,23 @@ async def gerar_chave_ativacao(empresa_id: uuid.UUID, dados: ChaveAtivacaoReques
     ainda não tinha a capacidade "Agentes", ela é habilitada aqui (gerar uma
     chave para uma empresa sem agentes não teria efeito) e isso fica auditado.
     """
-    empresa = await conn.fetchrow(
-        "SELECT id, nome, status, agentes_endpoint_habilitado FROM empresas WHERE id = $1", empresa_id,
-    )
+    empresa = await servico_empresas.obter_empresa(sessao, empresa_id)
     if empresa is None:
         raise HTTPException(status_code=404, detail="empresa não encontrada")
     if empresa["status"] != "ativa":
         raise HTTPException(status_code=409, detail=f"empresa com status '{empresa['status']}': reative antes de gerar chaves")
     habilitou_agora = False
-    async with conn.transaction():
+    async with sessao.begin_nested():
         if not empresa["agentes_endpoint_habilitado"]:
-            await conn.execute("UPDATE empresas SET agentes_endpoint_habilitado = true WHERE id = $1", empresa_id)
+            await servico_empresas.habilitar_agentes_endpoint(sessao, empresa_id)
             await servico_auditoria.registrar_evento(
-                conn, str(empresa_id), "empresa.agentes_habilitados",
+                sessao, str(empresa_id), "empresa.agentes_habilitados",
                 {"motivo": "chave de ativação gerada pelo provedor"}, ator_superadmin_id=su["sub"],
             )
             habilitou_agora = True
         expira_em = datetime.now(timezone.utc) + timedelta(hours=dados.validade_horas)
         token_publico, token = await servico_enrollment.criar_token_enrollment(
-            conn, str(empresa_id), expira_em, max_usos=dados.max_instalacoes, ator_superadmin_id=su["sub"],
+            sessao, str(empresa_id), expira_em, max_usos=dados.max_instalacoes, ator_superadmin_id=su["sub"],
         )
     backend_url = chave_ativacao.endereco_publico(request.app.state.settings.url_base_publica, str(request.base_url))
     return {

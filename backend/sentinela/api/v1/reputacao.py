@@ -14,7 +14,7 @@ router = APIRouter(prefix="/reputacao", tags=["reputacao"])
 
 
 @router.get("/{ip}")
-async def consultar_reputacao(ip: str, usuario: dict = Depends(exigir_login), conn=Depends(conexao_tenant)):
+async def consultar_reputacao(ip: str, usuario: dict = Depends(exigir_login), sessao=Depends(conexao_tenant)):
     # Valida ANTES de qualquer I/O: sem isso, uma string arbitrária no path
     # (não necessariamente um IP) chegava a construir a URL da consulta ao
     # VirusTotal (ver core/reputacao.py:consultar_virustotal, que interpola
@@ -25,4 +25,4 @@ async def consultar_reputacao(ip: str, usuario: dict = Depends(exigir_login), co
     # que `ipaddress.ip_address` sozinho aceitava mas `inet` não entende.
     if ip_valido(ip) is None:
         raise HTTPException(status_code=422, detail="IP inválido")
-    return await servico.consultar_reputacao_ip(conn, usuario["empresa_id"], ip)
+    return await servico.consultar_reputacao_ip(sessao, usuario["empresa_id"], ip)

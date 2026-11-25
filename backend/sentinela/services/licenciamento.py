@@ -8,7 +8,7 @@ Regras de negócio de licenciamento (planos, licenças, ocupação de vagas de
 endpoint) -- ver ARQUITETURA_LICENCIAMENTO.md para o desenho completo.
 
 Convenção seguida do resto de services/*.py: toda função recebe uma conexão
-JÁ escopada (tenant_scoped_connection ou superadmin_scoped_connection,
+JÁ escopada (Database.tenant_session ou Database.superadmin_session,
 dependendo da rota) -- nunca abre conexão própria. Ações administrativas
 chamam `services/auditoria.py:registrar_evento` na MESMA transação (atômico
 com a ação); validações de alta frequência do Agent gravam em
@@ -16,10 +16,10 @@ com a ação); validações de alta frequência do Agent gravam em
 migration 0019 (não poluir o audit log administrativo com ruído de
 heartbeat).
 """
-import json
 
 from sentinela.auth.licencas import gerar_token
-from sentinela.auth.security import hash_senha
+from sentinela.auth.security import hash_token
+from sentinela.repositories.licencas import LicencaRepositorio
 from sentinela.services import auditoria as servico_auditoria
 
 STATUS_VALIDOS = {"ativa", "suspensa", "expirada", "revogada"}
@@ -37,10 +37,10 @@ class LimiteEndpointsExcedidoError(ValueError):
     """
 
 
-def _publico_licenca(row):
-    if row is None:
+def _publico_licenca(licenca):
+    if licenca is None:
         return None
-    d = dict(row)
+    d = licenca.para_dict()
     for campo in ("id", "empresa_id", "plano_id", "criado_por_usuario_id", "criado_por_superadmin_id"):
         if d.get(campo) is not None:
             d[campo] = str(d[campo])
@@ -50,36 +50,35 @@ def _publico_licenca(row):
     return d
 
 
-def _publico_plano(row):
-    if row is None:
+def _publico_plano(plano):
+    if plano is None:
         return None
-    d = dict(row)
+    d = plano.para_dict()
     d["id"] = str(d["id"])
-    # asyncpg devolve jsonb já decodificado como dict/list/str conforme o
-    # driver -- mas por segurança (algumas configurações de codec
-    # devolvem string crua) normaliza aqui.
-    if isinstance(d.get("recursos"), str):
-        d["recursos"] = json.loads(d["recursos"])
     return d
 
 
-async def listar_planos(conn):
-    rows = await conn.fetch("SELECT * FROM planos WHERE ativo = true ORDER BY max_endpoints ASC")
-    return [_publico_plano(r) for r in rows]
+def _publico_vaga(vaga):
+    d = vaga.para_dict()
+    for campo in ("id", "empresa_id", "licenca_id", "agente_id"):
+        d[campo] = str(d[campo])
+    return d
 
 
-async def obter_plano(conn, plano_id):
-    row = await conn.fetchrow("SELECT * FROM planos WHERE id = $1", plano_id)
-    return _publico_plano(row)
+async def listar_planos(sessao):
+    return [_publico_plano(p) for p in await LicencaRepositorio(sessao).listar_planos_ativos()]
 
 
-async def listar_licencas(conn):
+async def obter_plano(sessao, plano_id):
+    return _publico_plano(await LicencaRepositorio(sessao).obter_plano(plano_id))
+
+
+async def listar_licencas(sessao):
     """Conn tenant-scoped -> RLS já filtra pra empresa do chamador."""
-    rows = await conn.fetch("SELECT * FROM licencas ORDER BY criado_em DESC")
-    return [_publico_licenca(r) for r in rows]
+    return [_publico_licenca(r) for r in await LicencaRepositorio(sessao).listar()]
 
 
-async def criar_licenca(conn, empresa_id, plano_id, expira_em=None,
+async def criar_licenca(sessao, empresa_id, plano_id, expira_em=None,
                           ator_usuario_id=None, ator_superadmin_id=None):
     """
     Cria uma licença nova para `empresa_id`. Retorna (licenca_publica,
@@ -90,41 +89,32 @@ async def criar_licenca(conn, empresa_id, plano_id, expira_em=None,
     vazar um asyncpg.ForeignKeyViolationError cru (mesmo raciocínio do
     comentário equivalente em api/v1/admin.py:criar_usuario_da_empresa).
     """
-    plano = await conn.fetchrow("SELECT id FROM planos WHERE id = $1 AND ativo = true", plano_id)
-    if plano is None:
+    repo = LicencaRepositorio(sessao)
+    if not await repo.plano_ativo_existe(plano_id):
         raise PlanoInvalidoError("plano inválido ou inativo")
-
     token_completo, prefixo = gerar_token()
-    token_hash = hash_senha(token_completo)
-    row = await conn.fetchrow(
-        """
-        INSERT INTO licencas (empresa_id, plano_id, token_prefixo, token_hash, expira_em,
-                               criado_por_usuario_id, criado_por_superadmin_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING *
-        """,
-        empresa_id, plano_id, prefixo, token_hash, expira_em, ator_usuario_id, ator_superadmin_id,
+    token_hash = hash_token(token_completo)
+    row = await repo.criar(
+        empresa_id=empresa_id, plano_id=plano_id, token_prefixo=prefixo, token_hash=token_hash,
+        expira_em=expira_em, criado_por_usuario_id=ator_usuario_id, criado_por_superadmin_id=ator_superadmin_id,
     )
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "licenca.criada", {"licenca_id": str(row["id"]), "plano_id": str(plano_id)},
+        sessao, empresa_id, "licenca.criada", {"licenca_id": str(row.id), "plano_id": str(plano_id)},
         ator_usuario_id=ator_usuario_id, ator_superadmin_id=ator_superadmin_id,
     )
-    await _registrar_evento_licenca(conn, empresa_id, row["id"], "licenca.criada", {})
+    await _registrar_evento_licenca(sessao, empresa_id, row.id, "licenca.criada", {})
     return _publico_licenca(row), token_completo
 
 
-async def _registrar_evento_licenca(conn, empresa_id, licenca_id, tipo: str, detalhes: dict):
+async def _registrar_evento_licenca(sessao, empresa_id, licenca_id, tipo: str, detalhes: dict):
     """Grava em `licencas_eventos` -- histórico de alta frequência, separado
     da tabela `auditoria` genérica (ver docstring do módulo)."""
-    await conn.execute(
-        "INSERT INTO licencas_eventos (empresa_id, licenca_id, tipo, detalhes) VALUES ($1, $2, $3, $4::jsonb)",
-        empresa_id, licenca_id, tipo, json.dumps(detalhes, ensure_ascii=False, default=str),
-    )
+    await LicencaRepositorio(sessao).registrar_evento(empresa_id, licenca_id, tipo, detalhes)
 
 
 """
 As quatro funções abaixo (ativar_licenca/validar_licenca/
-obter_status_licenca/desativar_licenca) recebem `conn` (tenant-scoped) e
+obter_status_licenca/desativar_licenca) recebem `sessao` (tenant-scoped) e
 `licenca` (o dict resolvido pelo token -- ver auth/dependencies.py:
 licenca_atual + conexao_tenant_licenca, que espelham agente_atual +
 conexao_tenant_agente): a resolução do token via BYPASSRLS e a abertura da
@@ -134,7 +124,7 @@ mesma convenção do restante de services/*.py.
 """
 
 
-async def ativar_licenca(conn, licenca: dict):
+async def ativar_licenca(sessao, licenca: dict):
     """
     Primeiro contato do Agent. Idempotente -- reativar um token já ativo não
     é erro, só não sobrescreve `ativada_em` se já estiver preenchido (a
@@ -143,17 +133,14 @@ async def ativar_licenca(conn, licenca: dict):
     Retorna o dict público da licença (incluindo `status` -- quem chama
     decide se um status != 'ativa' vira 403 na rota).
     """
-    row = await conn.fetchrow(
-        "UPDATE licencas SET ativada_em = COALESCE(ativada_em, now()) WHERE id = $1 RETURNING *",
-        licenca["licenca_id"],
-    )
+    row = await LicencaRepositorio(sessao).marcar_ativada(licenca["licenca_id"])
     if row is None:
         return None
-    await _registrar_evento_licenca(conn, licenca["empresa_id"], licenca["licenca_id"], "licenca.ativada", {})
+    await _registrar_evento_licenca(sessao, licenca["empresa_id"], licenca["licenca_id"], "licenca.ativada", {})
     return _publico_licenca(row)
 
 
-async def validar_licenca(conn, licenca: dict):
+async def validar_licenca(sessao, licenca: dict):
     """
     Validação periódica do Agent. Sempre atualiza `ultima_validacao_em`
     (mesmo para uma licença suspensa/expirada/revogada -- o backend registra
@@ -166,30 +153,27 @@ async def validar_licenca(conn, licenca: dict):
     Nunca levanta exceção por status inválido -- devolve o status tal como
     está, quem chama (a rota) decide o HTTPException.
     """
-    row = await conn.fetchrow(
-        "UPDATE licencas SET ultima_validacao_em = now() WHERE id = $1 RETURNING *",
-        licenca["licenca_id"],
-    )
+    repo = LicencaRepositorio(sessao)
+    row = await repo.marcar_validada(licenca["licenca_id"])
     if row is None:
         return None
-    plano = await conn.fetchrow("SELECT * FROM planos WHERE id = $1", row["plano_id"])
+    plano = await repo.obter_plano(row.plano_id)
     await _registrar_evento_licenca(
-        conn, licenca["empresa_id"], licenca["licenca_id"], "licenca.validada", {"status": row["status"]},
+        sessao, licenca["empresa_id"], licenca["licenca_id"], "licenca.validada", {"status": row.status},
     )
     publico = _publico_licenca(row)
     publico["plano"] = _publico_plano(plano)
     return publico
 
 
-async def obter_status_licenca(conn, licenca: dict):
+async def obter_status_licenca(sessao, licenca: dict):
     """Leitura simples, sem side-effect (GET /licencas/status) -- não grava
     evento nem atualiza `ultima_validacao_em` (isso é papel de `validate`,
     que o Agent chama periodicamente; `status` é para inspeção pontual)."""
-    row = await conn.fetchrow("SELECT * FROM licencas WHERE id = $1", licenca["licenca_id"])
-    return _publico_licenca(row)
+    return _publico_licenca(await LicencaRepositorio(sessao).obter(licenca["licenca_id"]))
 
 
-async def desativar_licenca(conn, licenca: dict):
+async def desativar_licenca(sessao, licenca: dict):
     """
     O próprio Agent avisando que está sendo desinstalado (best-effort -- ver
     ARQUITETURA_LICENCIAMENTO.md §5). Não muda `status` da licença (ela
@@ -198,40 +182,37 @@ async def desativar_licenca(conn, licenca: dict):
     `revogar_licenca`/`suspender_licenca`); só registra o evento para
     visibilidade futura.
     """
-    await _registrar_evento_licenca(conn, licenca["empresa_id"], licenca["licenca_id"], "licenca.desativada_pelo_agente", {})
-    row = await conn.fetchrow("SELECT * FROM licencas WHERE id = $1", licenca["licenca_id"])
-    return _publico_licenca(row)
+    await _registrar_evento_licenca(sessao, licenca["empresa_id"], licenca["licenca_id"], "licenca.desativada_pelo_agente", {})
+    return _publico_licenca(await LicencaRepositorio(sessao).obter(licenca["licenca_id"]))
 
 
-async def _mudar_status(conn, empresa_id, licenca_id, novo_status: str, tipo_evento: str,
+async def _mudar_status(sessao, empresa_id, licenca_id, novo_status: str, tipo_evento: str,
                           ator_usuario_id=None, ator_superadmin_id=None):
-    row = await conn.fetchrow(
-        "UPDATE licencas SET status = $2 WHERE id = $1 RETURNING *", licenca_id, novo_status,
-    )
+    row = await LicencaRepositorio(sessao).mudar_status(licenca_id, novo_status)
     if row is None:
         return None
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, tipo_evento, {"licenca_id": str(licenca_id), "novo_status": novo_status},
+        sessao, empresa_id, tipo_evento, {"licenca_id": str(licenca_id), "novo_status": novo_status},
         ator_usuario_id=ator_usuario_id, ator_superadmin_id=ator_superadmin_id,
     )
-    await _registrar_evento_licenca(conn, empresa_id, licenca_id, tipo_evento, {})
+    await _registrar_evento_licenca(sessao, empresa_id, licenca_id, tipo_evento, {})
     return _publico_licenca(row)
 
 
-async def suspender_licenca(conn, empresa_id, licenca_id, ator_usuario_id=None, ator_superadmin_id=None):
-    return await _mudar_status(conn, empresa_id, licenca_id, "suspensa", "licenca.suspensa",
+async def suspender_licenca(sessao, empresa_id, licenca_id, ator_usuario_id=None, ator_superadmin_id=None):
+    return await _mudar_status(sessao, empresa_id, licenca_id, "suspensa", "licenca.suspensa",
                                  ator_usuario_id, ator_superadmin_id)
 
 
-async def revogar_licenca(conn, empresa_id, licenca_id, ator_usuario_id=None, ator_superadmin_id=None):
+async def revogar_licenca(sessao, empresa_id, licenca_id, ator_usuario_id=None, ator_superadmin_id=None):
     """Nunca DELETE -- preserva o histórico (mesma filosofia de
     services/agentes.py:revogar_agente). Uma licença revogada nunca volta a
     ficar ativa; para "desfazer", cria-se uma licença nova."""
-    return await _mudar_status(conn, empresa_id, licenca_id, "revogada", "licenca.revogada",
+    return await _mudar_status(sessao, empresa_id, licenca_id, "revogada", "licenca.revogada",
                                  ator_usuario_id, ator_superadmin_id)
 
 
-async def renovar_licenca(conn, empresa_id, licenca_id, nova_expiracao=None,
+async def renovar_licenca(sessao, empresa_id, licenca_id, nova_expiracao=None,
                             ator_usuario_id=None, ator_superadmin_id=None):
     """
     Renovação manual (o "payment confirmed -> license created/renewed" do
@@ -241,24 +222,22 @@ async def renovar_licenca(conn, empresa_id, licenca_id, nova_expiracao=None,
     recupera o acesso; uma revogada NÃO (revogação é definitiva, ver
     revogar_licenca).
     """
-    row_atual = await conn.fetchrow("SELECT status FROM licencas WHERE id = $1", licenca_id)
-    if row_atual is None:
+    repo = LicencaRepositorio(sessao)
+    atual = await repo.obter(licenca_id)
+    if atual is None:
         return None
-    if row_atual["status"] == "revogada":
+    if atual.status == "revogada":
         raise ValueError("licença revogada não pode ser renovada -- crie uma licença nova")
-    row = await conn.fetchrow(
-        "UPDATE licencas SET status = 'ativa', expira_em = $2 WHERE id = $1 RETURNING *",
-        licenca_id, nova_expiracao,
-    )
+    row = await repo.renovar(licenca_id, nova_expiracao)
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "licenca.renovada", {"licenca_id": str(licenca_id), "nova_expiracao": str(nova_expiracao)},
+        sessao, empresa_id, "licenca.renovada", {"licenca_id": str(licenca_id), "nova_expiracao": str(nova_expiracao)},
         ator_usuario_id=ator_usuario_id, ator_superadmin_id=ator_superadmin_id,
     )
-    await _registrar_evento_licenca(conn, empresa_id, licenca_id, "licenca.renovada", {})
+    await _registrar_evento_licenca(sessao, empresa_id, licenca_id, "licenca.renovada", {})
     return _publico_licenca(row)
 
 
-async def registrar_endpoint(conn, empresa_id, licenca_id, agente_id):
+async def registrar_endpoint(sessao, empresa_id, licenca_id, agente_id):
     """
     Ocupa uma vaga de endpoint para `agente_id` sob `licenca_id`, aplicando
     o limite `planos.max_endpoints`. Idempotente para o MESMO agente
@@ -268,48 +247,43 @@ async def registrar_endpoint(conn, empresa_id, licenca_id, agente_id):
     Levanta LimiteEndpointsExcedidoError se a licença já estiver usando
     todas as vagas do plano -- a rota traduz para HTTP 409.
     """
-    existente = await conn.fetchrow(
-        "SELECT * FROM licencas_endpoints WHERE agente_id = $1 AND liberado_em IS NULL", agente_id,
-    )
+    repo = LicencaRepositorio(sessao)
+    existente = await repo.obter_vaga_aberta(agente_id)
     if existente is not None:
-        return dict(existente, id=str(existente["id"]), empresa_id=str(existente["empresa_id"]),
-                     licenca_id=str(existente["licenca_id"]), agente_id=str(existente["agente_id"]))
-
-    licenca = await conn.fetchrow("SELECT plano_id FROM licencas WHERE id = $1", licenca_id)
+        return _publico_vaga(existente)
+    # FOR UPDATE na linha da licença: serializa registros concorrentes sob a
+    # mesma licença. Sem isso, "conta as vagas" e "ocupa a vaga" formavam um
+    # TOCTOU e duas máquinas simultâneas podiam furar `max_endpoints`.
+    licenca = await repo.obter(licenca_id, para_atualizar=True)
     if licenca is None:
         raise PlanoInvalidoError("licença não encontrada")
-    plano = await conn.fetchrow("SELECT max_endpoints FROM planos WHERE id = $1", licenca["plano_id"])
-    ocupadas = await conn.fetchval(
-        "SELECT count(*) FROM licencas_endpoints WHERE licenca_id = $1 AND liberado_em IS NULL", licenca_id,
-    )
-    if ocupadas >= plano["max_endpoints"]:
+    plano = await repo.obter_plano(licenca.plano_id)
+    ocupadas = await repo.contar_vagas_ocupadas(licenca_id)
+    if ocupadas >= plano.max_endpoints:
         await _registrar_evento_licenca(
-            conn, empresa_id, licenca_id, "licenca.endpoint_negado_limite",
-            {"agente_id": str(agente_id), "max_endpoints": plano["max_endpoints"]},
+            sessao, empresa_id, licenca_id, "licenca.endpoint_negado_limite",
+            {"agente_id": str(agente_id), "max_endpoints": plano.max_endpoints},
         )
         raise LimiteEndpointsExcedidoError(
-            f"limite de {plano['max_endpoints']} endpoints do plano já atingido"
+            f"limite de {plano.max_endpoints} endpoints do plano já atingido"
         )
-
-    row = await conn.fetchrow(
-        "INSERT INTO licencas_endpoints (empresa_id, licenca_id, agente_id) VALUES ($1, $2, $3) RETURNING *",
-        empresa_id, licenca_id, agente_id,
-    )
-    await _registrar_evento_licenca(conn, empresa_id, licenca_id, "licenca.endpoint_registrado", {"agente_id": str(agente_id)})
-    return dict(row, id=str(row["id"]), empresa_id=str(row["empresa_id"]),
-                 licenca_id=str(row["licenca_id"]), agente_id=str(row["agente_id"]))
+    vaga = await repo.ocupar_vaga(empresa_id, licenca_id, agente_id)
+    await _registrar_evento_licenca(sessao, empresa_id, licenca_id, "licenca.endpoint_registrado", {"agente_id": str(agente_id)})
+    return _publico_vaga(vaga)
 
 
-async def liberar_endpoint(conn, empresa_id, agente_id):
+async def liberar_endpoint(sessao, empresa_id, agente_id):
     """Soft-release da vaga ocupada por `agente_id` (ex.: quando o agente é
     revogado -- fiação com o fluxo de revogação de agente fica para uma
     etapa futura; a função já existe pronta para ser chamada de lá)."""
-    row = await conn.fetchrow(
-        "UPDATE licencas_endpoints SET liberado_em = now() WHERE agente_id = $1 AND liberado_em IS NULL RETURNING *",
-        agente_id,
-    )
-    if row is None:
+    vaga = await LicencaRepositorio(sessao).liberar_vaga(agente_id)
+    if vaga is None:
         return None
-    await _registrar_evento_licenca(conn, empresa_id, row["licenca_id"], "licenca.endpoint_liberado", {"agente_id": str(agente_id)})
-    return dict(row, id=str(row["id"]), empresa_id=str(row["empresa_id"]),
-                 licenca_id=str(row["licenca_id"]), agente_id=str(row["agente_id"]))
+    await _registrar_evento_licenca(sessao, empresa_id, vaga.licenca_id, "licenca.endpoint_liberado", {"agente_id": str(agente_id)})
+    return _publico_vaga(vaga)
+
+
+async def obter_empresa_da_licenca(sessao, licenca_id):
+    """`empresa_id` dono da licença, ou None se não existir (precisa de sessão superadmin: cruza tenants)."""
+    licenca = await LicencaRepositorio(sessao).obter(licenca_id)
+    return licenca.empresa_id if licenca else None

@@ -38,20 +38,18 @@ import argparse
 import asyncio
 import os
 
-import asyncpg
+from sentinela.database import Database, DatabaseSettings
+from sentinela.repositories.superadmins import SuperadminRepositorio
 
 
 async def revogar_sessao_superadmin(database_url_admin: str, email: str) -> int | None:
     """Devolve o novo `token_version`, ou `None` se não existe superadmin com este email."""
-    conn = await asyncpg.connect(database_url_admin)
+    db = Database.conectar(DatabaseSettings(url=database_url_admin, pool_size=1, max_overflow=0))
     try:
-        row = await conn.fetchrow(
-            "UPDATE superadmins SET token_version = token_version + 1 WHERE email = $1 RETURNING token_version",
-            email,
-        )
-        return row["token_version"] if row else None
+        async with db.superadmin_session() as sessao:
+            return await SuperadminRepositorio(sessao).revogar_sessoes_por_email(email)
     finally:
-        await conn.close()
+        await db.fechar()
 
 
 def _construir_parser():

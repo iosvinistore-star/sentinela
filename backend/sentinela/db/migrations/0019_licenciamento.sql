@@ -83,7 +83,7 @@ CREATE POLICY tenant_isolation_licencas ON licencas
 CREATE INDEX IF NOT EXISTS idx_licencas_empresa ON licencas (empresa_id);
 -- token_prefixo já é UNIQUE (cria o índice); documentado aqui pelo mesmo
 -- motivo do comentário equivalente em 0016_agentes_endpoint.sql -- o
--- lookup de autenticação roda via superadmin_scoped_connection (BYPASSRLS),
+-- lookup de autenticação roda via Database.superadmin_session (BYPASSRLS),
 -- o mesmo problema de "ovo e galinha" do login/agentes.
 
 -- 3) Vagas de endpoint ocupadas por uma licença -- reaproveita `agentes`

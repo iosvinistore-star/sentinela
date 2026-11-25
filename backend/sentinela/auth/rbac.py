@@ -328,15 +328,14 @@ async def _auditar_permissao_negada(request: Request, sessao: dict, papel_concei
 
     Abre a conexão RLS-scoped correta conforme o TIPO de sessão -- uma
     sessão de superadmin não tem `empresa_id` (RLS de `auditoria` não se
-    aplicaria), então usa `superadmin_scoped_connection`; uma sessão de
-    usuário de empresa usa `tenant_scoped_connection` (mesma conexão
+    aplicaria), então usa `Database.superadmin_session`; uma sessão de
+    usuário de empresa usa `Database.tenant_session` (mesma conexão
     RLS-scoped que qualquer outra escrita em `auditoria` usaria).
     """
     try:
-        from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
         from sentinela.services import auditoria as servico_auditoria
 
-        pool = request.app.state.pool
+        db = request.app.state.db
         detalhes = {
             "papel": papel_conceitual,
             "permissoes_faltando": faltando,
@@ -344,15 +343,15 @@ async def _auditar_permissao_negada(request: Request, sessao: dict, papel_concei
             "metodo": request.method,
         }
         if sessao.get("papel") == "superadmin":
-            async with superadmin_scoped_connection(pool) as conn:
+            async with db.superadmin_session() as sessao_db:
                 await servico_auditoria.registrar_evento(
-                    conn, None, "PERMISSION_DENIED", detalhes, ator_superadmin_id=sessao.get("sub"),
+                    sessao_db, None, "PERMISSION_DENIED", detalhes, ator_superadmin_id=sessao.get("sub"),
                 )
         else:
             empresa_id = sessao.get("empresa_id")
-            async with tenant_scoped_connection(pool, empresa_id) as conn:
+            async with db.tenant_session(empresa_id) as sessao_db:
                 await servico_auditoria.registrar_evento(
-                    conn, empresa_id, "PERMISSION_DENIED", detalhes, ator_usuario_id=sessao.get("sub"),
+                    sessao_db, empresa_id, "PERMISSION_DENIED", detalhes, ator_usuario_id=sessao.get("sub"),
                 )
     except Exception:
         pass

@@ -17,8 +17,9 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.templating import Jinja2Templates
 
 from sentinela.auth.dependencies import usuario_atual
-from sentinela.db.pool import superadmin_scoped_connection, tenant_scoped_connection
-
+from sentinela.repositories.empresas import EmpresaRepositorio
+from sentinela.repositories.superadmins import SuperadminRepositorio
+from sentinela.repositories.usuarios import UsuarioRepositorio
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -90,37 +91,32 @@ async def conexao_tenant_web(usuario: dict = Depends(exigir_login_web), request:
     """Ver AcessoEmpresaSuspensaError/SessaoInvalidaError -- reforço em tempo real que espelha auth/dependencies.py:conexao_tenant,
     incluindo a checagem de token_version ("tv") contra troca de senha (migrations/0011_token_version.sql) e de
     `empresa_id = $2` contra adulteração dessa claim no JWT (ver o comentário longo em auth/dependencies.py:conexao_tenant)."""
-    async with tenant_scoped_connection(request.app.state.pool, usuario["empresa_id"]) as conn:
-        status = await conn.fetchval("SELECT status FROM empresas WHERE id = $1", usuario["empresa_id"])
+    async with request.app.state.db.tenant_session(usuario["empresa_id"]) as sessao:
+        status = await EmpresaRepositorio(sessao).obter_status(usuario["empresa_id"])
         if status != "ativa":
             raise AcessoEmpresaSuspensaError(status)
-        linha = await conn.fetchrow(
-            "SELECT ativo, papel, token_version FROM usuarios WHERE id = $1 AND empresa_id = $2",
-            usuario["sub"], usuario["empresa_id"],
-        )
+        linha = await UsuarioRepositorio(sessao).obter_para_sessao(usuario["sub"], usuario["empresa_id"])
         if (
             linha is None
-            or not linha["ativo"]
-            or linha["papel"] != usuario["papel"]
-            or linha["token_version"] != usuario.get("tv")
+            or not linha.ativo
+            or linha.papel != usuario["papel"]
+            or linha.token_version != usuario.get("tv")
         ):
             raise SessaoInvalidaError()
-        yield conn
+        yield sessao
 
 
 async def conexao_superadmin_web(su: dict = Depends(exigir_superadmin_web), request: Request = None):
     """Ver auth/dependencies.py:conexao_superadmin -- mesmo reforço em tempo real (token_version, "tv",
     e a partir da Fase C também `papel` / "papel_saas"), espelhado aqui pelo mesmo motivo que
     conexao_tenant_web espelha conexao_tenant (redirect em vez de 401 JSON)."""
-    async with superadmin_scoped_connection(request.app.state.pool) as conn:
-        linha = await conn.fetchrow(
-            "SELECT token_version, papel FROM superadmins WHERE id = $1", su["sub"],
-        )
+    async with request.app.state.db.superadmin_session() as sessao:
+        linha = await SuperadminRepositorio(sessao).obter_para_sessao(su["sub"])
         papel_saas_no_token = su.get("papel_saas") or "saas_owner"
         if (
             linha is None
-            or linha["token_version"] != su.get("tv")
-            or linha["papel"] != papel_saas_no_token
+            or linha.token_version != su.get("tv")
+            or linha.papel != papel_saas_no_token
         ):
             raise SessaoInvalidaError()
-        yield conn
+        yield sessao

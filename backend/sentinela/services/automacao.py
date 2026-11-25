@@ -40,7 +40,9 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sentinela.db.pool import superadmin_scoped_connection
+from sentinela.repositories.empresas import EmpresaRepositorio
+from sentinela.repositories.incidentes import IncidenteRepositorio
+from sentinela.repositories.ips_protegidos import IpProtegidoRepositorio
 from sentinela.services import auditoria as servico_auditoria
 
 logger = logging.getLogger("sentinela.automacao")
@@ -63,7 +65,7 @@ _HORAS_INCIDENTE_PARADO = 72
 REVERSAO_RAPIDA_HORAS = 1  # usado por services/firewall.py (capacidade 4)
 
 
-async def avaliar_e_ajustar_modo_firewall(conn, empresa_id):
+async def avaliar_e_ajustar_modo_firewall(sessao, empresa_id):
     """
     Lê os últimos `_JANELA_AMOSTRAS` bloqueios AUTOMÁTICOS (incidente_id IS
     NOT NULL) desta empresa e decide se `modo_firewall` deveria subir ou
@@ -79,34 +81,20 @@ async def avaliar_e_ajustar_modo_firewall(conn, empresa_id):
     esperar acumular a taxa de 15% -- é o modo mais permissivo, então o
     custo de um falso positivo escorregar é o maior.
 
-    `conn`: espera uma conexão com BYPASSRLS (superadmin_scoped_connection)
+    `sessao`: espera uma sessão com BYPASSRLS (superadmin_session)
     -- é quem tem o GRANT UPDATE em `empresas` (ver services/empresas.py,
     escrita em `empresas` é admin-only de propósito). Filtra por
     empresa_id explicitamente em toda consulta (defesa em profundidade --
     BYPASSRLS não filtra sozinho).
     """
-    linha_empresa = await conn.fetchrow(
-        "SELECT modo_firewall, modo_firewall_auto FROM empresas WHERE id = $1", empresa_id,
-    )
-    if linha_empresa is None or not linha_empresa["modo_firewall_auto"]:
+    linha_empresa = await EmpresaRepositorio(sessao).obter_config_firewall(empresa_id)
+    if linha_empresa is None or not linha_empresa.modo_firewall_auto:
         return None
-    modo_atual = linha_empresa["modo_firewall"]
+    modo_atual = linha_empresa.modo_firewall
     if modo_atual not in _ESCADA_MODO_FIREWALL:
         return None
 
-    amostras = await conn.fetch(
-        """
-        SELECT b.bloqueado_em, b.removido_em,
-               (b.removido_em IS NOT NULL AND b.removido_em - b.bloqueado_em < interval '2 hours') AS revertido_rapido,
-               (i.status = 'FALSO_POSITIVO') AS foi_falso_positivo
-        FROM bloqueios_firewall b
-        JOIN incidentes i ON i.id = b.incidente_id
-        WHERE b.empresa_id = $1 AND b.incidente_id IS NOT NULL
-        ORDER BY b.bloqueado_em DESC
-        LIMIT $2
-        """,
-        empresa_id, _JANELA_AMOSTRAS,
-    )
+    amostras = await IncidenteRepositorio(sessao).amostras_de_bloqueios_automaticos(empresa_id, _JANELA_AMOSTRAS)
     if not amostras:
         return None
 
@@ -135,9 +123,9 @@ async def avaliar_e_ajustar_modo_firewall(conn, empresa_id):
     if novo_modo is None or novo_modo == modo_atual:
         return None
 
-    await conn.execute("UPDATE empresas SET modo_firewall = $1 WHERE id = $2", novo_modo, empresa_id)
+    await EmpresaRepositorio(sessao).definir_modo_firewall(empresa_id, novo_modo)
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "firewall.modo_ajustado_automaticamente",
+        sessao, empresa_id, "firewall.modo_ajustado_automaticamente",
         {
             "modo_anterior": modo_atual, "modo_novo": novo_modo, "motivo": motivo,
             "amostras": total, "problemas": problemas, "taxa_problema": round(taxa_problema, 3),
@@ -147,7 +135,7 @@ async def avaliar_e_ajustar_modo_firewall(conn, empresa_id):
     return {"modo_anterior": modo_atual, "modo_novo": novo_modo, "motivo": motivo}
 
 
-async def auto_classificar_incidentes_abertos(conn, empresa_id, agora=None):
+async def auto_classificar_incidentes_abertos(sessao, empresa_id, agora=None):
     """
     Fecha incidentes esquecidos: nenhum humano tocou (`em_andamento_por_usuario_id
     IS NULL`) e o incidente está parado (sem atualização) há mais de
@@ -182,32 +170,17 @@ async def auto_classificar_incidentes_abertos(conn, empresa_id, agora=None):
     RESOLVIDO (caso a lógica de contenção mude no futuro) ou ficam para um
     humano, do mesmo jeito que HIGH/CRITICAL sem contenção já ficava.
 
-    Só age se `empresas.auto_triagem_incidentes = true`. `conn`: mesmo
+    Só age se `empresas.auto_triagem_incidentes = true`. `sessao`: mesmo
     contrato de `avaliar_e_ajustar_modo_firewall` (BYPASSRLS, filtra
     empresa_id manualmente).
     """
     agora = agora or datetime.now(timezone.utc)
-    ligada = await conn.fetchval("SELECT auto_triagem_incidentes FROM empresas WHERE id = $1", empresa_id)
-    if not ligada:
+    if not await EmpresaRepositorio(sessao).auto_triagem_ligada(empresa_id):
         return []
 
     limite = agora - timedelta(hours=_HORAS_INCIDENTE_PARADO)
-    candidatos = await conn.fetch(
-        """
-        SELECT i.id, i.incident_id, i.ip, i.severidade, i.observacoes, i.origem,
-               EXISTS (
-                   SELECT 1 FROM bloqueios_firewall b
-                   WHERE b.incidente_id = i.id AND b.status = 'ativo'
-               ) AS contido
-        FROM incidentes i
-        WHERE i.empresa_id = $1
-          AND i.status IN ('OPEN', 'EM_ANDAMENTO')
-          AND i.em_andamento_por_usuario_id IS NULL
-          AND i.atualizado_em < $2
-        """,
-        empresa_id, limite,
-    )
-
+    repo = IncidenteRepositorio(sessao)
+    candidatos = await repo.candidatos_a_triagem(empresa_id, limite)
     resultados = []
     for c in candidatos:
         if c["contido"]:
@@ -224,16 +197,9 @@ async def auto_classificar_incidentes_abertos(conn, empresa_id, agora=None):
         nota_completa = f"[triagem automática] parado há mais de {_HORAS_INCIDENTE_PARADO}h sem ação humana, {nota}."
         nova_observacoes = f"{c['observacoes']}\n{nota_completa}" if c["observacoes"] else nota_completa
 
-        await conn.execute(
-            """
-            UPDATE incidentes SET status = $1, resolvido_por = 'sistema',
-                                   observacoes = $2, atualizado_em = now()
-            WHERE id = $3
-            """,
-            novo_status, nova_observacoes, c["id"],
-        )
+        await repo.resolver_pelo_sistema(c["id"], novo_status, nova_observacoes)
         await servico_auditoria.registrar_evento(
-            conn, empresa_id, "incidente.triagem_automatica",
+            sessao, empresa_id, "incidente.triagem_automatica",
             {"incident_id": c["incident_id"], "status_novo": novo_status, "contido": c["contido"], "severidade": c["severidade"]},
             ator_usuario_id=None,
         )
@@ -242,7 +208,7 @@ async def auto_classificar_incidentes_abertos(conn, empresa_id, agora=None):
     return resultados
 
 
-async def obter_contagem_falsos_positivos(conn, empresa_id, ip: str) -> int:
+async def obter_contagem_falsos_positivos(sessao, empresa_id, ip: str) -> int:
     """Quantos incidentes DE REDE deste IP, NESTE tenant, já foram marcados
     FALSO_POSITIVO (por humano ou pela auto-triagem acima). Ver
     core/risk_engine.aplicar_amortecimento_falso_positivo -- usado para
@@ -265,28 +231,21 @@ async def obter_contagem_falsos_positivos(conn, empresa_id, ip: str) -> int:
     silenciosamente a guarda contra ataques de REDE do mesmo IP -- os dois
     sinais nunca deveriam ter se misturado.
     """
-    return await conn.fetchval(
-        "SELECT count(*) FROM incidentes WHERE empresa_id = $1 AND ip = $2::inet AND status = 'FALSO_POSITIVO' AND origem = 'rede'",
-        empresa_id, ip,
-    )
+    return await IncidenteRepositorio(sessao).contar_falsos_positivos_de_rede(empresa_id, ip)
 
 
-def _linha_ip_protegido_para_dict(row):
-    d = dict(row)
+def _linha_ip_protegido_para_dict(ip_protegido):
+    d = ip_protegido.para_dict()  # `ip` (inet) já vem como str
     d["id"] = str(d["id"])
     d["empresa_id"] = str(d["empresa_id"])
-    d["ip"] = str(d["ip"])
     return d
 
 
-async def listar_ips_protegidos(conn, empresa_id):
-    rows = await conn.fetch(
-        "SELECT * FROM ips_protegidos WHERE empresa_id = $1 ORDER BY criado_em DESC", empresa_id,
-    )
-    return [_linha_ip_protegido_para_dict(r) for r in rows]
+async def listar_ips_protegidos(sessao, empresa_id):
+    return [_linha_ip_protegido_para_dict(r) for r in await IpProtegidoRepositorio(sessao).listar(empresa_id)]
 
 
-async def adicionar_ip_protegido(conn, empresa_id, ip: str, motivo: str = "", origem: str = "manual",
+async def adicionar_ip_protegido(sessao, empresa_id, ip: str, motivo: str = "", origem: str = "manual",
                                    criado_por_usuario_id=None):
     """origem: 'manual' (um admin protegeu explicitamente, via API/dashboard)
     ou 'automatico' (ver services/firewall.py -- reversão rápida de um
@@ -295,7 +254,7 @@ async def adicionar_ip_protegido(conn, empresa_id, ip: str, motivo: str = "", or
 
     Proteger de novo um IP já protegido só atualiza o motivo (não duplica
     linha nem dá erro) -- via DELETE+INSERT dentro de um SAVEPOINT (é o que
-    `conn.transaction()` vira automaticamente quando chamado dentro de uma
+    `sessao.begin_nested()` vira automaticamente quando chamado dentro de uma
     transação já aberta, mesmo padrão de services/resposta_incidentes.py),
     não `ON CONFLICT DO UPDATE`: essa seria a forma mais direta, mas
     exigiria GRANT UPDATE em `ips_protegidos` para app_tenant -- privilégio
@@ -303,43 +262,30 @@ async def adicionar_ip_protegido(conn, empresa_id, ip: str, motivo: str = "", or
     migrations/0014_...sql: uma entrada é criada ou removida, nunca
     "editada", preservando o rastro de cada evento em vez de
     sobrescrevê-lo)."""
-    async with conn.transaction():
-        await conn.execute("DELETE FROM ips_protegidos WHERE empresa_id = $1 AND ip = $2::inet", empresa_id, ip)
-        row = await conn.fetchrow(
-            """
-            INSERT INTO ips_protegidos (empresa_id, ip, motivo, origem, criado_por_usuario_id)
-            VALUES ($1, $2::inet, $3, $4, $5)
-            RETURNING *
-            """,
-            empresa_id, ip, motivo, origem, criado_por_usuario_id,
-        )
+    async with sessao.begin_nested():
+        row = await IpProtegidoRepositorio(sessao).substituir(empresa_id, ip, motivo, origem, criado_por_usuario_id)
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "firewall.ip_protegido_adicionado", {"ip": ip, "motivo": motivo, "origem": origem},
+        sessao, empresa_id, "firewall.ip_protegido_adicionado", {"ip": ip, "motivo": motivo, "origem": origem},
         ator_usuario_id=criado_por_usuario_id,
     )
     return _linha_ip_protegido_para_dict(row)
 
 
-async def remover_ip_protegido(conn, empresa_id, ip: str, usuario_id=None) -> bool:
-    row = await conn.fetchrow(
-        "DELETE FROM ips_protegidos WHERE empresa_id = $1 AND ip = $2::inet RETURNING id", empresa_id, ip,
-    )
-    if row is not None:
+async def remover_ip_protegido(sessao, empresa_id, ip: str, usuario_id=None) -> bool:
+    removido = await IpProtegidoRepositorio(sessao).remover(empresa_id, ip)
+    if removido:
         await servico_auditoria.registrar_evento(
-            conn, empresa_id, "firewall.ip_protegido_removido", {"ip": ip}, ator_usuario_id=usuario_id,
+            sessao, empresa_id, "firewall.ip_protegido_removido", {"ip": ip}, ator_usuario_id=usuario_id,
         )
-    return row is not None
-
-
-async def listar_ips_protegidos_para_whitelist(conn, empresa_id):
+    return removido
+async def listar_ips_protegidos_para_whitelist(sessao, empresa_id):
     """Só os endereços (list[str]), no formato que
     core.firewall.ip_e_protegido espera em `whitelist` -- ver
     services/firewall.py:registrar_bloqueio."""
-    rows = await conn.fetch("SELECT host(ip) AS ip FROM ips_protegidos WHERE empresa_id = $1", empresa_id)
-    return [r["ip"] for r in rows]
+    return await IpProtegidoRepositorio(sessao).listar_enderecos(empresa_id)
 
 
-async def executar_ciclo_autonomo(pool):
+async def executar_ciclo_autonomo(db):
     """
     Iteração cross-tenant com BYPASSRLS (mesmo padrão de
     services/firewall.py:sincronizar_bloqueios_expirados), uma
@@ -347,20 +293,17 @@ async def executar_ciclo_autonomo(pool):
     ciclo das outras. Só considera empresas ativas com pelo menos uma das
     duas flags de autonomia ligada.
     """
-    async with superadmin_scoped_connection(pool) as conn:
-        empresas_elegiveis = await conn.fetch(
-            "SELECT id FROM empresas WHERE status = 'ativa' AND (modo_firewall_auto OR auto_triagem_incidentes)",
-        )
+    async with db.superadmin_session() as sessao:
+        empresas_elegiveis = await EmpresaRepositorio(sessao).listar_ids_com_autonomia()
 
     resultado = {"empresas_processadas": 0, "ajustes_modo": [], "triagens": [], "erros": []}
-    for linha in empresas_elegiveis:
-        empresa_id = linha["id"]
+    for empresa_id in empresas_elegiveis:
         try:
-            async with superadmin_scoped_connection(pool) as conn:
-                ajuste = await avaliar_e_ajustar_modo_firewall(conn, empresa_id)
+            async with db.superadmin_session() as sessao:
+                ajuste = await avaliar_e_ajustar_modo_firewall(sessao, empresa_id)
                 if ajuste:
                     resultado["ajustes_modo"].append({"empresa_id": str(empresa_id), **ajuste})
-                triagens = await auto_classificar_incidentes_abertos(conn, empresa_id)
+                triagens = await auto_classificar_incidentes_abertos(sessao, empresa_id)
                 if triagens:
                     resultado["triagens"].extend({"empresa_id": str(empresa_id), **t} for t in triagens)
             resultado["empresas_processadas"] += 1
@@ -371,7 +314,7 @@ async def executar_ciclo_autonomo(pool):
     return resultado
 
 
-async def rodar_ciclo_autonomo_periodicamente(pool, intervalo_segundos: int = 900):
+async def rodar_ciclo_autonomo_periodicamente(db, intervalo_segundos: int = 900):
     """
     Loop em background iniciado no lifespan (ver main.py) -- roda
     `executar_ciclo_autonomo` a cada `intervalo_segundos` (default 15min)
@@ -384,7 +327,7 @@ async def rodar_ciclo_autonomo_periodicamente(pool, intervalo_segundos: int = 90
     while True:
         try:
             await asyncio.sleep(intervalo_segundos)
-            await executar_ciclo_autonomo(pool)
+            await executar_ciclo_autonomo(db)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 -- um ciclo com erro não deve matar o loop inteiro

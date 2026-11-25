@@ -4,10 +4,15 @@
 # Ver o arquivo LICENSE na raiz do projeto.
 # SENTINELA-COPYRIGHT-FIM
 """
-Runner de migrations SQL — sem ORM/Alembic, só aplica os arquivos .sql
-numerados desta pasta em ordem, uma vez cada, registrando o que já rodou em
-`schema_migrations`. Mantém o estilo "SQL puro" já usado no resto do
-projeto (nada aqui usa ORM).
+Runner de migrations SQL — só aplica os arquivos .sql numerados desta pasta
+em ordem, uma vez cada, registrando o que já rodou em `schema_migrations`.
+
+É o ÚNICO ponto do backend que fala SQL cru com o banco (DDL: roles, RLS,
+grants e índices parciais, que o autogenerate de ORM não expressa) e só roda
+no deploy, com DSN de superusuário -- o runtime da aplicação usa apenas
+`sentinela.database` + repositórios. Os modelos ORM (`sentinela/models`)
+espelham este schema; `tests/integration/test_models_schema.py` garante que
+não divergem.
 
 Uso:
     python -m sentinela.db.migrations.run_migrations \

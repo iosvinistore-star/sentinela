@@ -14,10 +14,12 @@ escopada -- nunca abre conexão própria. Ações administrativas (criar/
 revogar) chamam `services/auditoria.py:registrar_evento` na MESMA
 transação.
 """
+import asyncio
 from datetime import datetime, timezone
 
 from sentinela.auth.enrollment import gerar_token
 from sentinela.auth.security import hash_senha
+from sentinela.repositories.agentes import EnrollmentRepositorio
 from sentinela.services import agentes as servico_agentes
 from sentinela.services import auditoria as servico_auditoria
 
@@ -35,10 +37,10 @@ class TokenEnrollmentInvalidoError(ValueError):
     """
 
 
-def _publico(row):
-    if row is None:
+def _publico(token):
+    if token is None:
         return None
-    d = dict(row)
+    d = token.para_dict()
     for campo in ("id", "empresa_id", "criado_por_usuario_id"):
         if d.get(campo) is not None:
             d[campo] = str(d[campo])
@@ -48,7 +50,7 @@ def _publico(row):
     return d
 
 
-async def criar_token_enrollment(conn, empresa_id, expira_em, max_usos=None, ator_usuario_id=None, ator_superadmin_id=None):
+async def criar_token_enrollment(sessao, empresa_id, expira_em, max_usos=None, ator_usuario_id=None, ator_superadmin_id=None):
     """
     Cria um token de enrollment novo para `empresa_id`. Retorna
     (token_publico, token_completo) -- o token só existe aqui, uma vez,
@@ -57,47 +59,35 @@ async def criar_token_enrollment(conn, empresa_id, expira_em, max_usos=None, ato
     depois disso).
     """
     token_completo, prefixo = gerar_token()
-    token_hash = hash_senha(token_completo)
-    row = await conn.fetchrow(
-        """
-        INSERT INTO agentes_enrollment_tokens
-            (empresa_id, token_prefixo, token_hash, expira_em, max_usos, criado_por_usuario_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING *
-        """,
-        empresa_id, prefixo, token_hash, expira_em, max_usos, ator_usuario_id,
-    )
+    token_hash = await asyncio.to_thread(hash_senha, token_completo)
+    row = await EnrollmentRepositorio(sessao).criar(empresa_id, prefixo, token_hash, expira_em, max_usos, ator_usuario_id)
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "agente.enrollment_criado",
-        {"enrollment_id": str(row["id"]), "expira_em": str(expira_em), "max_usos": max_usos},
+        sessao, empresa_id, "agente.enrollment_criado",
+        {"enrollment_id": str(row.id), "expira_em": str(expira_em), "max_usos": max_usos},
         ator_usuario_id=ator_usuario_id, ator_superadmin_id=ator_superadmin_id,
     )
     return _publico(row), token_completo
 
 
-async def listar_tokens_enrollment(conn):
+async def listar_tokens_enrollment(sessao):
     """Conn tenant-scoped -> RLS já filtra pra empresa do chamador."""
-    rows = await conn.fetch("SELECT * FROM agentes_enrollment_tokens ORDER BY criado_em DESC")
-    return [_publico(r) for r in rows]
+    return [_publico(r) for r in await EnrollmentRepositorio(sessao).listar()]
 
 
-async def revogar_token_enrollment(conn, empresa_id, enrollment_id, ator_usuario_id=None):
+async def revogar_token_enrollment(sessao, empresa_id, enrollment_id, ator_usuario_id=None):
     """Nunca DELETE -- preserva o histórico (mesma filosofia do resto do
     projeto). Idempotente: revogar um token já revogado não é erro."""
-    row = await conn.fetchrow(
-        "UPDATE agentes_enrollment_tokens SET status = 'revogado' WHERE id = $1 AND empresa_id = $2 RETURNING *",
-        enrollment_id, empresa_id,
-    )
+    row = await EnrollmentRepositorio(sessao).revogar(empresa_id, enrollment_id)
     if row is None:
         return None
     await servico_auditoria.registrar_evento(
-        conn, empresa_id, "agente.enrollment_revogado", {"enrollment_id": str(enrollment_id)},
+        sessao, empresa_id, "agente.enrollment_revogado", {"enrollment_id": str(enrollment_id)},
         ator_usuario_id=ator_usuario_id,
     )
     return _publico(row)
 
 
-async def trocar_por_agente(conn, enrollment: dict, hostname: str):
+async def trocar_por_agente(sessao, enrollment: dict, hostname: str):
     """
     O passo central do D3: reserva atomicamente um uso do token de
     enrollment e, se a reserva for aceita, cria o agente permanente (via
@@ -125,30 +115,18 @@ async def trocar_por_agente(conn, enrollment: dict, hostname: str):
     (None, None) se o hostname já está em uso por um agente ATIVO desta
     empresa (mesmo contrato de `criar_agente`).
     """
-    reservado = await conn.fetchrow(
-        """
-        UPDATE agentes_enrollment_tokens
-        SET usos = usos + 1
-        WHERE id = $1 AND status = 'ativo' AND expira_em > now()
-              AND (max_usos IS NULL OR usos < max_usos)
-        RETURNING usos
-        """,
-        enrollment["enrollment_id"],
-    )
+    repo = EnrollmentRepositorio(sessao)
+    reservado = await repo.reservar_uso(enrollment["enrollment_id"])
     if reservado is None:
-        linha = await conn.fetchrow(
-            "SELECT status, expira_em FROM agentes_enrollment_tokens WHERE id = $1",
-            enrollment["enrollment_id"],
-        )
+        linha = await repo.obter_status(enrollment["enrollment_id"])
         if linha is None:
             raise TokenEnrollmentInvalidoError("token de enrollment não encontrado")
-        if linha["status"] != "ativo":
+        if linha.status != "ativo":
             raise TokenEnrollmentInvalidoError("token de enrollment revogado")
-        if linha["expira_em"] <= datetime.now(timezone.utc):
+        if linha.expira_em <= datetime.now(timezone.utc):
             raise TokenEnrollmentInvalidoError("token de enrollment expirado")
         raise TokenEnrollmentInvalidoError("token de enrollment esgotou o limite de usos")
-
-    agente, token = await servico_agentes.criar_agente(conn, enrollment["empresa_id"], hostname)
+    agente, token = await servico_agentes.criar_agente(sessao, enrollment["empresa_id"], hostname)
     if agente is not None:
         # Evento próprio (além do "agente.criado" que criar_agente já
         # grava) -- liga o agente novo ao token de enrollment usado, para
@@ -156,7 +134,7 @@ async def trocar_por_agente(conn, enrollment: dict, hostname: str):
         # token" (útil quando vários tokens de enrollment coexistem, ex.:
         # um por lote de instalação).
         await servico_auditoria.registrar_evento(
-            conn, enrollment["empresa_id"], "agente.criado_via_enrollment",
+            sessao, enrollment["empresa_id"], "agente.criado_via_enrollment",
             {"enrollment_id": str(enrollment["enrollment_id"]), "agente_id": agente["id"], "hostname": hostname},
         )
     return agente, token

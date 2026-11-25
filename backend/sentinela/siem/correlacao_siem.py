@@ -27,6 +27,7 @@ import logging
 import os
 from typing import Any
 
+from sentinela.repositories.siem import CorrelacaoRepositorio
 from sentinela.siem.sigma import SigmaErro, compilar_regra
 from sentinela.siem.ueba import avaliar_lote, chave_entidade
 
@@ -37,6 +38,11 @@ _SEVERIDADES_ALTAS = {"HIGH", "CRITICAL", "ALERT", "EMERGENCY"}
 _MAX_TOKENS_POR_EVENTO = 64
 _MAX_TOKENS_POR_LOTE = 20_000
 _PONTUACAO = str.maketrans({c: " " for c in "[](),;'\"<>{}|="})
+
+
+def _json_seguro(valor: Any) -> Any:
+    """Garante um valor serializável como JSONB (o que não for nativo vira str, como no json.dumps(default=str) legado)."""
+    return json.loads(json.dumps(valor, default=str))
 
 
 def _tokens(evento: dict[str, Any]) -> set[str]:
@@ -71,38 +77,27 @@ def regras_deterministicas(evento: dict[str, Any]) -> list[tuple[str, int]]:
     return regras
 
 
-async def carregar_contexto(conn, empresa_id: str) -> dict[str, Any]:
+async def carregar_contexto(sessao, empresa_id: str) -> dict[str, Any]:
     """Regras Sigma compiladas + playbooks ativos do tenant (uma vez por lote)."""
+    repo = CorrelacaoRepositorio(sessao)
     sigma = []
-    for r in await conn.fetch(
-        "SELECT id, nome, nivel, logsource, detection FROM sigma_regras WHERE empresa_id=$1 AND ativo=true", empresa_id
-    ):
-        regra = dict(r)
-        for campo in ("logsource", "detection"):
-            if isinstance(regra[campo], str):
-                regra[campo] = json.loads(regra[campo])
+    for regra in await repo.sigma_ativas(empresa_id):
         try:
             sigma.append((regra, compilar_regra(regra)))
         except SigmaErro as exc:  # regra antiga gravada antes da validação
             log.warning("Regra Sigma ignorada (inválida): id=%s erro=%s", regra["id"], exc)
-    playbooks = []
-    for p in await conn.fetch(
-        "SELECT id, nome, gatilho, acoes FROM soar_playbooks WHERE empresa_id=$1 AND ativo=true", empresa_id
-    ):
-        pb = dict(p)
-        if isinstance(pb["acoes"], str):
-            pb["acoes"] = json.loads(pb["acoes"])
-        playbooks.append(pb)
+    playbooks = await repo.playbooks_ativos(empresa_id)
     return {"sigma": sigma, "playbooks": playbooks}
 
 
-async def correlacionar_lote(conn, empresa_id: str, eventos: list[tuple[int, dict[str, Any]]],
+async def correlacionar_lote(sessao, empresa_id: str, eventos: list[tuple[int, dict[str, Any]]],
                              contexto: dict[str, Any] | None = None) -> dict[str, int]:
     """Correlaciona eventos já persistidos. Devolve contadores do lote."""
     vazio = {"correlacoes": 0, "playbooks": 0, "sigma_alertas": 0, "anomalias_ueba": 0}
     if not eventos:
         return vazio
-    ctx = contexto or await carregar_contexto(conn, empresa_id)
+    repo = CorrelacaoRepositorio(sessao)
+    ctx = contexto or await carregar_contexto(sessao, empresa_id)
 
     # CTI: uma consulta para o lote inteiro.
     tokens_por_evento = {eid: _tokens(ev) for eid, ev in eventos}
@@ -113,20 +108,15 @@ async def correlacionar_lote(conn, empresa_id: str, eventos: list[tuple[int, dic
             break
     cti_por_valor: dict[str, list[dict[str, Any]]] = {}
     if todos:
-        for r in await conn.fetch(
-            """SELECT id, indicator_type, valor, confidence FROM cti_indicadores
-                WHERE empresa_id=$1 AND lower(valor) = ANY($2::text[])
-                  AND (valid_until IS NULL OR valid_until > now())""",
-            empresa_id, list(todos),
-        ):
-            cti_por_valor.setdefault(r["valor"].lower(), []).append(dict(r))
+        for r in await repo.indicadores_por_valor(empresa_id, list(todos)):
+            cti_por_valor.setdefault(r["valor"].lower(), []).append(r)
 
     # UEBA: por entidade distinta do lote.
-    anomalias = await avaliar_lote(conn, empresa_id, eventos)
+    anomalias = await avaliar_lote(sessao, empresa_id, eventos)
 
-    correlacoes_rows: list[tuple] = []
-    execucoes_rows: list[tuple] = []
-    sigma_rows: list[tuple] = []
+    correlacoes_rows: list[dict] = []
+    execucoes_rows: list[dict] = []
+    sigma_rows: list[dict] = []
     for evento_id, ev in eventos:
         regras = regras_deterministicas(ev)
         cti = [i for tok in tokens_por_evento[evento_id] for i in cti_por_valor.get(tok, [])][:20]
@@ -140,8 +130,9 @@ async def correlacionar_lote(conn, empresa_id: str, eventos: list[tuple[int, dic
             regras.append(("ueba_anomaly", 75))
         sigma_hits = [regra for regra, comp in ctx["sigma"] if comp.casa(ev)]
         for regra in sigma_hits:
-            sigma_rows.append((empresa_id, regra["id"], evento_id, str(regra["nivel"]).upper(),
-                               json.dumps({"regra": regra["nome"], "automatico": True})))
+            sigma_rows.append({"empresa_id": empresa_id, "regra_id": regra["id"], "evento_id": evento_id,
+                               "severidade": str(regra["nivel"]).upper(),
+                               "evidencias": {"regra": regra["nome"], "automatico": True}})
         if sigma_hits:
             regras.append(("sigma_match", 80))
         if not regras:
@@ -165,29 +156,20 @@ async def correlacionar_lote(conn, empresa_id: str, eventos: list[tuple[int, dic
             "playbooks": [pb["id"] for pb in playbooks],
             "execucao_destrutiva": False,
         }
-        correlacoes_rows.append((empresa_id, regra, [evento_id], severity, score, bool(cti),
-                                 playbooks[0]["id"] if playbooks else None, json.dumps(detalhes, default=str)))
+        detalhes = _json_seguro(detalhes)
+        correlacoes_rows.append({"empresa_id": empresa_id, "regra": regra, "evento_ids": [evento_id],
+                                 "severidade": severity, "score": score, "cti_match": bool(cti),
+                                 "playbook_id": playbooks[0]["id"] if playbooks else None, "detalhes": detalhes})
         for pb in playbooks:
-            execucoes_rows.append((empresa_id, pb["id"],
-                                   json.dumps({**detalhes, "acoes_planejadas": pb["acoes"]}, default=str)))
+            execucoes_rows.append({"empresa_id": empresa_id, "playbook_id": pb["id"], "status": "CORRELACIONADO",
+                                   "resultado": {**detalhes, "acoes_planejadas": pb["acoes"]}})
 
     if sigma_rows:
-        await conn.executemany(
-            """INSERT INTO sigma_alertas (empresa_id, regra_id, evento_id, severidade, evidencias)
-               VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (regra_id, evento_id) DO NOTHING""",
-            sigma_rows,
-        )
+        await repo.inserir_sigma_alertas(sigma_rows)
     if correlacoes_rows:
-        await conn.executemany(
-            """INSERT INTO siem_correlacoes (empresa_id, regra, evento_ids, severidade, score, cti_match, playbook_id, detalhes)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)""",
-            correlacoes_rows,
-        )
+        await repo.inserir_correlacoes(correlacoes_rows)
     if execucoes_rows:
-        await conn.executemany(
-            "INSERT INTO soar_execucoes (empresa_id, playbook_id, status, resultado) VALUES ($1,$2,'CORRELACIONADO',$3::jsonb)",
-            execucoes_rows,
-        )
+        await repo.inserir_execucoes(execucoes_rows)
     return {
         "correlacoes": len(correlacoes_rows),
         "playbooks": len(execucoes_rows),
@@ -196,7 +178,7 @@ async def correlacionar_lote(conn, empresa_id: str, eventos: list[tuple[int, dic
     }
 
 
-async def correlacionar_evento(conn, empresa_id: str, evento_id: int, evento: dict[str, Any]) -> dict[str, Any]:
+async def correlacionar_evento(sessao, empresa_id: str, evento_id: int, evento: dict[str, Any]) -> dict[str, Any]:
     """Compatibilidade: correlaciona um único evento."""
-    r = await correlacionar_lote(conn, empresa_id, [(evento_id, evento)])
+    r = await correlacionar_lote(sessao, empresa_id, [(evento_id, evento)])
     return {"correlacionado": r["correlacoes"] > 0, "playbooks": r["playbooks"], "sigma_alertas": r["sigma_alertas"]}

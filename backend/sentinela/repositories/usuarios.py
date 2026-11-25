@@ -70,3 +70,17 @@ class UsuarioRepositorio(RepositorioBase):
     async def obter_id_ativo_por_email(self, email: str):
         stmt = select(Usuario.id).where(Usuario.email == email, Usuario.ativo.is_(True))
         return (await self.sessao.execute(stmt)).scalar_one_or_none()
+
+    async def obter_para_sessao(self, usuario_id, empresa_id):
+        """(ativo, papel, token_version) para reconferir a sessão em tempo real, ou None."""
+        stmt = select(Usuario.ativo, Usuario.papel, Usuario.token_version).where(
+            Usuario.id == usuario_id, Usuario.empresa_id == empresa_id
+        )
+        return (await self.sessao.execute(stmt)).one_or_none()
+
+    async def obter_para_refresh(self, usuario_id):
+        stmt = select(
+            Usuario.id, Usuario.empresa_id, Usuario.email, Usuario.papel, Usuario.token_version, Usuario.ativo
+        ).where(Usuario.id == usuario_id)
+        linha = (await self.sessao.execute(stmt)).one_or_none()
+        return dict(linha._mapping) if linha else None

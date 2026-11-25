@@ -6,7 +6,7 @@
 -- Tabela de tokens do fluxo "esqueci minha senha" (services/redefinicao_senha.py).
 --
 -- Sem RLS -- mesma categoria de empresas/superadmins/reputacao_cache: essa
--- tabela só é tocada via superadmin_scoped_connection (BYPASSRLS), porque
+-- tabela só é tocada via Database.superadmin_session (BYPASSRLS), porque
 -- o pedido de reset acontece ANTES do chamador estar autenticado (mesmo
 -- problema de "ovo e galinha" do login -- ver auth/login.py).
 --

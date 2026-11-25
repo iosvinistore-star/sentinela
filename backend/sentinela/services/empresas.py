@@ -98,3 +98,20 @@ async def atualizar_empresa(sessao, empresa_id, nome: str | None = None, plano: 
             ator_superadmin_id=ator_superadmin_id,
         )
     return _publico(row)
+
+
+async def nome_da_empresa_com_cnpj(sessao, cnpj: str, exceto_id=None) -> str | None:
+    """Nome da empresa que já usa este CNPJ (ignorando `exceto_id`), ou None se estiver livre."""
+    return await EmpresaRepositorio(sessao).buscar_nome_por_cnpj(cnpj, exceto_id)
+
+
+async def gravar_dados_contrato(sessao, empresa_id, cnpj: str | None, contrato: dict, habilitar_agentes: bool = False):
+    """Grava os dados comerciais (CNPJ, responsável, contrato...). Campos None são gravados como NULL."""
+    campos = {"cnpj": cnpj, **contrato}
+    if habilitar_agentes:
+        campos["agentes_endpoint_habilitado"] = True
+    return _publico(await EmpresaRepositorio(sessao).atualizar(empresa_id, campos))
+
+
+async def habilitar_agentes_endpoint(sessao, empresa_id) -> None:
+    await EmpresaRepositorio(sessao).atualizar(empresa_id, {"agentes_endpoint_habilitado": True})

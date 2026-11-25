@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from sentinela.auth.dependencies import conexao_tenant, exigir_csrf_header, exigir_papel
+from sentinela.services import soar as servico_soar
 
 router = APIRouter(prefix="/soar", tags=["soar"])
 
@@ -39,7 +40,6 @@ GATILHOS = {
     "high_severity": "Evento de severidade alta",
     "qualquer_alto_risco": "Qualquer correlação",
 }
-_COLUNAS = "id, nome, gatilho, acoes, ativo, criado_em"
 
 
 def _validar_gatilho(v: str) -> str:
@@ -91,85 +91,45 @@ class PlaybookPatch(BaseModel):
         return None if v is None else _validar_acoes(v)
 
 
-def _serializar(row) -> dict:
-    d = dict(row)
-    if isinstance(d.get("acoes"), str):
-        d["acoes"] = json.loads(d["acoes"])
-    return d
-
-
 @router.get("/gatilhos")
 async def listar_gatilhos(usuario: dict = Depends(exigir_papel("admin", "analista"))):
     return [{"valor": k, "rotulo": v} for k, v in GATILHOS.items()]
 
 
 @router.post("/playbooks", dependencies=[Depends(exigir_csrf_header)])
-async def criar_playbook(data: PlaybookIn, usuario: dict = Depends(exigir_papel("admin")), conn=Depends(conexao_tenant)):
-    row = await conn.fetchrow(
-        """INSERT INTO soar_playbooks (empresa_id, nome, gatilho, acoes, ativo) VALUES ($1,$2,$3,$4::jsonb,$5)
-           RETURNING id, nome, gatilho, acoes, ativo, criado_em""",
-        usuario["empresa_id"], data.nome, data.gatilho, json.dumps(data.acoes), data.ativo,
-    )
-    return _serializar(row)
+async def criar_playbook(data: PlaybookIn, usuario: dict = Depends(exigir_papel("admin")), sessao=Depends(conexao_tenant)):
+    return await servico_soar.criar_playbook(sessao, usuario["empresa_id"], data.nome, data.gatilho, data.acoes, data.ativo)
 
 
 @router.get("/playbooks")
-async def listar_playbooks(usuario: dict = Depends(exigir_papel("admin", "analista")), conn=Depends(conexao_tenant)):
-    rows = await conn.fetch(
-        "SELECT id, nome, gatilho, acoes, ativo, criado_em FROM soar_playbooks WHERE empresa_id=$1 ORDER BY id DESC",
-        usuario["empresa_id"],
-    )
-    return [_serializar(r) for r in rows]
+async def listar_playbooks(usuario: dict = Depends(exigir_papel("admin", "analista")), sessao=Depends(conexao_tenant)):
+    return await servico_soar.listar_playbooks(sessao, usuario["empresa_id"])
 
 
 @router.patch("/playbooks/{playbook_id}", dependencies=[Depends(exigir_csrf_header)])
 async def atualizar_playbook(playbook_id: int, data: PlaybookPatch, usuario: dict = Depends(exigir_papel("admin")),
-                             conn=Depends(conexao_tenant)):
+                             sessao=Depends(conexao_tenant)):
     campos = data.model_dump(exclude_none=True)
     if not campos:
         raise HTTPException(status_code=422, detail="nada para atualizar")
-    if "acoes" in campos:
-        campos["acoes"] = json.dumps(campos["acoes"])
-    sets, args = [], [playbook_id, usuario["empresa_id"]]
-    for nome, valor in campos.items():
-        args.append(valor)
-        sets.append(f"{nome} = ${len(args)}" + ("::jsonb" if nome == "acoes" else ""))
-    # nomes de coluna vêm do modelo Pydantic (conjunto fixo), valores em $n
-    row = await conn.fetchrow(
-        f"UPDATE soar_playbooks SET {', '.join(sets)} WHERE id=$1 AND empresa_id=$2 RETURNING {_COLUNAS}",  # nosec B608
-        *args,
-    )
-    if row is None:
-        raise HTTPException(status_code=404, detail="playbook não encontrado")
-    return _serializar(row)
+    try:
+        return await servico_soar.atualizar_playbook(sessao, usuario["empresa_id"], playbook_id, campos)
+    except servico_soar.PlaybookNaoEncontradoError as exc:
+        raise HTTPException(status_code=404, detail="playbook não encontrado") from exc
 
 
 @router.get("/execucoes")
 async def listar_execucoes(limite: int = Query(50, ge=1, le=500), usuario: dict = Depends(exigir_papel("admin", "analista")),
-                           conn=Depends(conexao_tenant)):
-    rows = await conn.fetch(
-        """SELECT e.id, e.playbook_id, p.nome AS playbook, e.incidente_id, e.status, e.executado_em,
-                  e.resultado->>'regra' AS regra, e.resultado->'evento_id' AS evento_id
-             FROM soar_execucoes e JOIN soar_playbooks p ON p.id = e.playbook_id
-            WHERE e.empresa_id=$1 ORDER BY e.executado_em DESC, e.id DESC LIMIT $2""",
-        usuario["empresa_id"], limite,
-    )
-    return [dict(r) for r in rows]
+                           sessao=Depends(conexao_tenant)):
+    return await servico_soar.listar_execucoes(sessao, usuario["empresa_id"], limite)
 
 
 @router.post("/playbooks/{playbook_id}/executar", dependencies=[Depends(exigir_csrf_header)])
 async def executar_playbook(playbook_id: int, incidente_id: int | None = None,
-                            usuario: dict = Depends(exigir_papel("admin", "analista")), conn=Depends(conexao_tenant)):
+                            usuario: dict = Depends(exigir_papel("admin", "analista")), sessao=Depends(conexao_tenant)):
     """Registra o acionamento manual do playbook (auditoria). Nenhuma ação é executada pela plataforma."""
-    pb = await conn.fetchrow("SELECT id, nome, acoes FROM soar_playbooks WHERE id=$1 AND empresa_id=$2 AND ativo=true",
-                             playbook_id, usuario["empresa_id"])
-    if not pb:
-        raise HTTPException(status_code=404, detail="playbook não encontrado ou inativo")
-    acoes = json.loads(pb["acoes"]) if isinstance(pb["acoes"], str) else pb["acoes"]
-    run = await conn.fetchrow(
-        """INSERT INTO soar_execucoes (empresa_id, playbook_id, incidente_id, status, resultado)
-           VALUES ($1,$2,$3,'ACIONADO_MANUAL',$4::jsonb) RETURNING id, status, executado_em""",
-        usuario["empresa_id"], playbook_id, incidente_id,
-        json.dumps({"acoes_planejadas": acoes, "acionado_por": str(usuario["sub"]), "execucao_destrutiva": False}),
-    )
-    return {"registrado": True, "playbook": pb["nome"], **dict(run)}
+    try:
+        run = await servico_soar.acionar_manual(sessao, usuario["empresa_id"], playbook_id, incidente_id, usuario["sub"])
+    except servico_soar.PlaybookNaoEncontradoError as exc:
+        raise HTTPException(status_code=404, detail="playbook não encontrado ou inativo") from exc
+    return {"registrado": True, **run}
